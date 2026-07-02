@@ -56,6 +56,13 @@ export default function tripsRouter(io) {
     res.json(trip);
   });
 
+  router.patch("/:id", (req, res) => {
+    if (!assertMember(req, res)) return;
+    const { currencyCode } = req.body || {};
+    if (currencyCode) db.setTripCurrency(req.params.id, currencyCode);
+    res.json(broadcast(req.params.id));
+  });
+
   router.delete("/:id", (req, res) => {
     if (!assertMember(req, res)) return;
     const trip = db.getTripFull(req.params.id);
@@ -78,6 +85,12 @@ export default function tripsRouter(io) {
 
   router.delete("/:id/members/:memberId", (req, res) => {
     if (!assertMember(req, res)) return;
+    const trip = db.getTripFull(req.params.id);
+    const isAdmin = trip.members.find(m => m.id === trip.admin)?.userId === req.userId;
+    const isSelf = trip.members.find(m => m.id === req.params.memberId)?.userId === req.userId;
+    if (!isAdmin && !isSelf) {
+      return res.status(403).json({ error: "Bu işlemi sadece admin ya da kendisi yapabilir" });
+    }
     const result = db.removeMember(req.params.id, req.params.memberId);
     if (!result.ok) return res.status(409).json({ error: result.reason });
     res.json(broadcast(req.params.id));

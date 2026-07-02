@@ -104,21 +104,23 @@ router.get("/fx", async (req, res) => {
 });
 
 router.get("/poi", async (req, res) => {
-  const { lat, lon } = req.query;
+  const { lat, lon, nocache } = req.query;
   if (!lat || !lon) return res.status(400).json({ error: "lat/lon gerekli" });
   const key = `poi:${lat}:${lon}`;
-  const cached = cacheGet(key);
-  if (cached) return res.json({ ...cached, cached: true });
-  const query = `[out:json][timeout:20];(
-    node["amenity"="restaurant"](around:3000,${lat},${lon});
-    node["amenity"="cafe"](around:3000,${lat},${lon});
-    node["tourism"="museum"](around:3000,${lat},${lon});
-    node["shop"~"mall|department_store|clothes|gift|general"](around:3000,${lat},${lon});
-  );out body 60;`;
+  if (!nocache) {
+    const cached = cacheGet(key);
+    if (cached) return res.json({ ...cached, cached: true });
+  }
+  const query = `[out:json][timeout:25];(
+    node["amenity"="restaurant"](around:5000,${lat},${lon});
+    node["amenity"="cafe"](around:5000,${lat},${lon});
+    node["tourism"="museum"](around:5000,${lat},${lon});
+    node["shop"~"mall|department_store|clothes|gift|general"](around:5000,${lat},${lon});
+  );out body 150;`;
   const endpoints = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"];
   for (const ep of endpoints) {
     try {
-      const data = await fetchJson(ep, { method: "POST", body: "data=" + encodeURIComponent(query) }, 12000);
+      const data = await fetchJson(ep, { method: "POST", body: "data=" + encodeURIComponent(query) }, 15000);
       const cats = { restaurant: [], cafe: [], museum: [], shopping: [] };
       for (const el of data.elements || []) {
         const name = el.tags?.name;
@@ -128,7 +130,7 @@ router.get("/poi", async (req, res) => {
         else if (el.tags.tourism === "museum") cats.museum.push(name);
         else if (el.tags.shop) cats.shopping.push(name);
       }
-      Object.keys(cats).forEach(k => cats[k] = [...new Set(cats[k])].slice(0, 10));
+      Object.keys(cats).forEach(k => cats[k] = [...new Set(cats[k])].slice(0, 30));
       cacheSet(key, cats, POI_TTL);
       return res.json(cats);
     } catch { /* try next endpoint */ }
