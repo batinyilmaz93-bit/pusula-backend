@@ -1,54 +1,45 @@
 # Deploy — Pusula Seyahat Backend
 
-## 1) En hızlı yol: Render / Railway / Fly.io
+## Zaten Render'da bir servisin varsa (mevcut durumun)
 
-Üçü de Node projelerini doğrudan GitHub reposundan build edip host eder.
+Sadece 3 adım, yeniden kurmana gerek yok:
 
-1. Bu `server/` klasörünü GitHub'a push et.
-2. Render/Railway'de "New Web Service" → repoyu bağla.
+1. [neon.tech](https://neon.tech) → ücretsiz Postgres oluştur → bağlantı
+   adresini kopyala.
+2. Render Dashboard → `pusula-backend` servisin → **Environment** sekmesi →
+   **Add Environment Variable** → Key: `DATABASE_URL`, Value: Neon'dan
+   aldığın adres.
+3. Bu klasördeki güncel dosyaları (özellikle `src/db.js`, `src/auth.js`,
+   `src/routes/`) GitHub'daki `pusula-backend` reposuna tekrar yükle (Add
+   file → Upload files). Render otomatik yeniden deploy eder.
+
+Deploy bitince Render'ın **Logs** sekmesinde `Pusula seyahat backend
+http://localhost:...` satırını görmelisin — bu, veritabanı bağlantısının
+başarılı olduğu ve tabloların oluşturulduğu anlamına gelir. Hata görürsen
+`DATABASE_URL`'i yanlış kopyalamış olabilirsin, tekrar kontrol et.
+
+Bu andan itibaren eski "Geçersiz oturum" sorunu bir daha çıkmaz — çünkü
+artık veriler Render'ın değil, Neon'un (ayrı, her zaman açık) sunucusunda
+duruyor.
+
+## Sıfırdan kuruyorsan
+
+1. Önce Neon'da veritabanını oluştur (yukarıdaki adım 1).
+2. Render → New → Web Service → `pusula-backend` reposunu bağla.
 3. Build command: `npm install` · Start command: `npm start`
-4. Environment variables: `JWT_SECRET` (rastgele uzun bir string), `PORT`
-   genelde platform tarafından otomatik verilir.
-5. SQLite dosyası container'ın diskinde tutulur — **tek instance** için
-   sorunsuz çalışır. Birden fazla instance/otomatik ölçeklendirme
-   istiyorsan adım 2'ye geç.
+4. Environment variables: `JWT_SECRET` (rastgele uzun bir string) ve
+   `DATABASE_URL` (Neon adresin).
+5. Create Web Service → birkaç dakika içinde adresin hazır.
 
-## 2) Ölçeklenebilir hâle getirme: Postgres'e geçiş
+## Notlar
 
-SQLite tek dosyaya yazdığı için birden fazla sunucu instance'ı paylaşamaz.
-Gerçek prod için:
-
-1. Neon veya Supabase'te ücretsiz bir Postgres veritabanı aç, `DATABASE_URL`'i al.
-2. `npm i -D prisma && npm i @prisma/client`
-3. `npx prisma migrate dev --name init` (şema zaten `prisma/schema.prisma` içinde hazır)
-4. `src/db.js` içindeki fonksiyonları aynı imzalarla Prisma sorgularına
-   çevir — her fonksiyonun üstünde zaten karşılık gelen SQL/Prisma yorumu
-   var, satır satır eşleşiyor.
-5. Cache katmanını (`src/cache.js`) Redis'e taşı (Upstash'in ücretsiz
-   planı yeterli) — birden fazla instance cache'i paylaşsın.
-
-## 3) Mevcut React artifact'ini bu backend'e bağlamak
-
-Şu anki `seyahat-butce.jsx` tamamen istemci taraflı çalışıyor
-(`window.storage` + doğrudan dış API çağrıları). Bu backend'e bağlamak için
-değişmesi gereken tek katman, verinin nereden geldiği — UI bileşenlerinin
-neredeyse hiçbiri değişmiyor:
-
-| Artifact'teki fonksiyon | Backend karşılığı |
-|---|---|
-| `loadTrips()` / `saveTrips()` | `GET /api/trips` (artık tüm cihazlarda ortak) |
-| `geocodeCity()` | `GET /api/proxy/geocode` |
-| `fetchWeatherTime()` | `GET /api/proxy/weather` |
-| `fetchCurrencyCode()` + `fetchExchangeRate()` | `GET /api/proxy/fx` |
-| `fetchPOI()` | `GET /api/proxy/poi` |
-| `fetchNews()` | `GET /api/proxy/news` |
-| `updateTrip()` içindeki her mutasyon | ilgili `POST/DELETE /api/trips/:id/...` çağrısı |
-| offline fallback (OFFLINE_CITIES/OFFLINE_RATES) | aynen kalır — backend de ulaşamazsa son çare olarak devrede |
-
-Ayrıca `useEffect` içindeki interval'ler yerini `socket.on("trip:update", ...)`
-dinleyicisine bırakır — polling yerine gerçek zamanlı güncelleme.
-
-İstersen bir sonraki adımda bu bağlama katmanını (`api-client.js`) yazıp
-artifact'i gerçekten bu backend'e bağlayabilirim; bu, artifact'in
-claude.ai içinde tek başına çalışma özelliğini kaybettirir (dış bir
-backend'e bağımlı hale gelir) — o yüzden ayrı bir onay istiyorum.
+- Render'ın ücretsiz planı 15 dakika hareketsizlikten sonra "uykuya"
+  girer; ilk istek ~30-60 saniye gecikebilir (sonraki istekler hızlı).
+  Bu artık veri kaybına yol açmıyor, sadece ilk açılışta küçük bir
+  bekleme demek.
+- Neon'un ücretsiz planı süresizdir (30 günde silinen bir şey yok), kredi
+  kartı istemez. Veritabanı 5 dakika hareketsizlikten sonra "uykuya" girer
+  ama bu sadece bir sonraki sorguda ~300-500ms'lik küçük bir gecikme
+  demek — Render'daki gibi veri kaybı **olmaz**, çünkü uyuyan şey compute,
+  diskteki veri değil. Bu uygulamanın trafiği için aylık ücretsiz kotayı
+  aşman neredeyse imkansız.

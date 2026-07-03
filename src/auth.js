@@ -15,24 +15,28 @@ import { createUser, getUser } from "./db.js";
 
 const SECRET = process.env.JWT_SECRET || "dev-secret-change-me";
 
-export function issueDeviceToken(name) {
-  const user = createUser(name);
+export async function issueDeviceToken(name) {
+  const user = await createUser(name);
   const token = jwt.sign({ sub: user.id, name: user.name }, SECRET, { expiresIn: "180d" });
   return { token, user };
 }
 
-export function requireAuth(req, res, next) {
+export async function requireAuth(req, res, next) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
   if (!token) return res.status(401).json({ error: "Yetkilendirme gerekli (token yok)" });
   try {
     const payload = jwt.verify(token, SECRET);
-    const user = getUser(payload.sub);
+    const user = await getUser(payload.sub);
     if (!user) return res.status(401).json({ error: "Geçersiz oturum" });
     req.userId = user.id;
     req.userName = user.name;
     next();
-  } catch {
-    return res.status(401).json({ error: "Geçersiz veya süresi dolmuş token" });
+  } catch (e) {
+    if (e?.name === "JsonWebTokenError" || e?.name === "TokenExpiredError") {
+      return res.status(401).json({ error: "Geçersiz veya süresi dolmuş token" });
+    }
+    console.error("Auth error:", e);
+    return res.status(500).json({ error: "Kimlik doğrulama hatası" });
   }
 }

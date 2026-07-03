@@ -61,12 +61,24 @@ router.get("/weather", async (req, res) => {
   const cached = cacheGet(key);
   if (cached) return res.json({ ...cached, cached: true });
   try {
-    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,weather_code,relative_humidity_2m,wind_speed_10m&timezone=${encodeURIComponent(timezone || "auto")}`;
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+      `&current=temperature_2m,weather_code,relative_humidity_2m,wind_speed_10m` +
+      `&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max` +
+      `&forecast_days=7&timezone=${encodeURIComponent(timezone || "auto")}`;
     const data = await fetchJson(url);
+    const daily = (data.daily?.time || []).map((date, i) => ({
+      date,
+      code: data.daily.weather_code?.[i],
+      tempMax: data.daily.temperature_2m_max?.[i],
+      tempMin: data.daily.temperature_2m_min?.[i],
+      precipitationChance: data.daily.precipitation_probability_max?.[i],
+      windMax: data.daily.wind_speed_10m_max?.[i],
+    }));
     const out = {
       temp: data.current?.temperature_2m, code: data.current?.weather_code,
       humidity: data.current?.relative_humidity_2m, wind: data.current?.wind_speed_10m,
       localTime: data.current?.time, timezone: data.timezone,
+      daily,
     };
     cacheSet(key, out, WEATHER_TTL);
     res.json(out);

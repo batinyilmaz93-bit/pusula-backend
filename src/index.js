@@ -8,6 +8,7 @@ import authRouter from "./routes/auth.js";
 import tripsRouter from "./routes/trips.js";
 import proxyRouter from "./routes/proxy.js";
 import { attachSocketHandlers } from "./ws.js";
+import { initSchema } from "./db.js";
 
 const app = express();
 app.use(cors());
@@ -28,6 +29,14 @@ app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
 });
 
 const PORT = process.env.PORT || 4000;
-httpServer.listen(PORT, () => {
-  console.log(`Pusula seyahat backend http://localhost:${PORT}`);
-});
+
+initSchema()
+  .then(() => {
+    httpServer.listen(PORT, () => {
+      console.log(`Pusula seyahat backend http://localhost:${PORT}`);
+    });
+  })
+  .catch((e) => {
+    console.error("Veritabanı şeması oluşturulamadı — DATABASE_URL doğru mu?", e);
+    process.exit(1);
+  });
