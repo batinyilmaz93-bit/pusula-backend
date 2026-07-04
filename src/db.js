@@ -56,6 +56,7 @@ export async function initSchema() {
       trip_id TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
       user_id TEXT REFERENCES users(id),
       name TEXT NOT NULL,
+      email TEXT,
       created_at TEXT NOT NULL
     );
 
@@ -90,6 +91,7 @@ export async function initSchema() {
     ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_expires TEXT;
+    ALTER TABLE trip_members ADD COLUMN IF NOT EXISTS email TEXT;
   `);
   try {
     await pool.query(`ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)`);
@@ -157,7 +159,7 @@ export async function getTripFull(tripId) {
   const trip = tripRows[0];
   if (!trip) return null;
   const { rows: members } = await pool.query(
-    `SELECT id, user_id as "userId", name FROM trip_members WHERE trip_id = $1 ORDER BY created_at ASC`, [tripId]);
+    `SELECT id, user_id as "userId", name, email FROM trip_members WHERE trip_id = $1 ORDER BY created_at ASC`, [tripId]);
   const { rows: expensesRaw } = await pool.query(
     `SELECT * FROM expenses WHERE trip_id = $1 ORDER BY created_at DESC`, [tripId]);
   const expenses = expensesRaw.map(e => ({
@@ -203,11 +205,11 @@ export async function isTripMember(tripId, userId) {
 }
 
 /* --------------------------- members ---------------------------- */
-export async function addMember(tripId, { userId = null, name }) {
+export async function addMember(tripId, { userId = null, name, email = null }) {
   const id = randomUUID();
-  await pool.query(`INSERT INTO trip_members (id, trip_id, user_id, name, created_at) VALUES ($1, $2, $3, $4, $5)`,
-    [id, tripId, userId, name, now()]);
-  return { id, userId, name };
+  await pool.query(`INSERT INTO trip_members (id, trip_id, user_id, name, email, created_at) VALUES ($1, $2, $3, $4, $5, $6)`,
+    [id, tripId, userId, name, email, now()]);
+  return { id, userId, name, email };
 }
 
 export async function removeMember(tripId, memberId) {

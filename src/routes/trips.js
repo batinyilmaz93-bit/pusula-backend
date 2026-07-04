@@ -1,6 +1,7 @@
 import { Router } from "express";
 import * as db from "../db.js";
 import { requireAuth } from "../auth.js";
+import { sendEmail } from "../email.js";
 
 export default function tripsRouter(io) {
   const router = Router();
@@ -84,9 +85,22 @@ export default function tripsRouter(io) {
   router.post("/:id/members", h(async (req, res) => {
     if (!(await assertMember(req, res))) return;
     const name = (req.body?.name || "").trim();
+    const email = (req.body?.email || "").trim() || null;
     if (!name) return res.status(400).json({ error: "İsim gerekli" });
-    await db.addMember(req.params.id, { name }); // guest member, no device account
-    res.status(201).json(await broadcast(req.params.id));
+    await db.addMember(req.params.id, { name, email }); // guest member, no device account yet
+    const fresh = await broadcast(req.params.id);
+    if (email) {
+      const appUrl = process.env.APP_URL || "http://localhost:5173";
+      const joinLink = `${appUrl}/?join=${fresh.inviteCode}`;
+      // Fire-and-forget: a slow/misconfigured email provider shouldn't block
+      // the member actually being added — the trip already has them either way.
+      sendEmail({
+        to: email,
+        subject: `${fresh.name} seyahatine davet edildin — Pusula`,
+        html: `<p>Merhaba ${name},</p><p><b>${req.userName}</b> seni <b>${fresh.name}</b> (${fresh.city}, ${fresh.country}) seyahatine ekledi.</p><p>Ortak bütçeyi ve seyahat detaylarını görmek için <a href="${joinLink}">buraya tıkla</a>, ya da Pusula uygulamasında davet kodunu gir: <b>${fresh.inviteCode}</b></p>`,
+      }).catch(err => console.error("[members] davet e-postası gönderilemedi:", err));
+    }
+    res.status(201).json(fresh);
   }));
 
   router.delete("/:id/members/:memberId", h(async (req, res) => {
