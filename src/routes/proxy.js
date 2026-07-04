@@ -179,26 +179,26 @@ router.get("/poi", async (req, res) => {
     const cached = cacheGet(key);
     if (cached) return res.json({ ...cached, cached: true });
   }
-  const query = `[out:json][timeout:20];(
-    node["amenity"="restaurant"](around:5000,${lat},${lon});
-    node["amenity"="cafe"](around:5000,${lat},${lon});
-    node["amenity"="bar"](around:5000,${lat},${lon});
-    node["amenity"="pub"](around:5000,${lat},${lon});
-    node["tourism"="museum"](around:5000,${lat},${lon});
-    node["tourism"="attraction"](around:5000,${lat},${lon});
-    node["tourism"="hotel"](around:5000,${lat},${lon});
-    node["tourism"="hostel"](around:5000,${lat},${lon});
-    node["tourism"="guest_house"](around:5000,${lat},${lon});
-    node["shop"~"mall|department_store|clothes|general"](around:5000,${lat},${lon});
-    node["shop"~"gift|souvenir"](around:5000,${lat},${lon});
-  );out body 250;`;
+  const query = `[out:json][timeout:18];(
+    node["amenity"="restaurant"](around:4000,${lat},${lon});
+    node["amenity"="cafe"](around:4000,${lat},${lon});
+    node["amenity"="bar"](around:4000,${lat},${lon});
+    node["amenity"="pub"](around:4000,${lat},${lon});
+    node["tourism"="museum"](around:4000,${lat},${lon});
+    node["tourism"="attraction"](around:4000,${lat},${lon});
+    node["tourism"="hotel"](around:4000,${lat},${lon});
+    node["tourism"="hostel"](around:4000,${lat},${lon});
+    node["tourism"="guest_house"](around:4000,${lat},${lon});
+    node["shop"~"mall|department_store|clothes|general"](around:4000,${lat},${lon});
+    node["shop"~"gift|souvenir"](around:4000,${lat},${lon});
+  );out body 180;`;
   const endpoints = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter", "https://overpass.openstreetmap.ru/api/interpreter"];
   try {
     // Race instead of sequential: whichever mirror answers first wins, so one
     // slow/overloaded instance (a well-documented issue with free Overpass
     // servers) no longer burns its full timeout before the next is even tried.
     const data = await Promise.any(
-      endpoints.map(ep => fetchJson(ep, { method: "POST", body: "data=" + encodeURIComponent(query) }, 7000))
+      endpoints.map(ep => fetchJson(ep, { method: "POST", body: "data=" + encodeURIComponent(query) }, 16000))
     );
     const cats = { restaurant: [], cafe: [], bar: [], museum: [], attraction: [], lodging: [], shopping: [], gift: [] };
     for (const el of data.elements || []) {
