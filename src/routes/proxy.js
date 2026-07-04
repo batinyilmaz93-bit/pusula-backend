@@ -12,6 +12,7 @@
 
 import { Router } from "express";
 import { cacheGet, cacheSet } from "../cache.js";
+import { lookupCurrency } from "../countryCurrency.js";
 
 const router = Router();
 
@@ -31,6 +32,33 @@ async function fetchJson(url, init, timeoutMs = 8000) {
   } finally {
     clearTimeout(t);
   }
+}
+
+async function fetchText(url, init, timeoutMs = 8000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...init, signal: ctrl.signal });
+    if (!res.ok) throw new Error(`upstream ${res.status}`);
+    return await res.text();
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// TCMB (T.C. Merkez Bankası) publishes an official daily XML feed of buy/sell
+// rates — the authoritative source for TRY conversions. No API key, no rate
+// limiting concerns (it's a government data feed, not a metered API).
+async function fetchTcmbRate(code) {
+  const xml = await fetchText("https://www.tcmb.gov.tr/kurlar/today.xml", {}, 8000);
+  const block = xml.match(new RegExp(`<Currency[^>]*Kod="${code}"[^>]*>([\\s\\S]*?)</Currency>`));
+  if (!block) throw new Error("TCMB listesinde bu para birimi yok");
+  const unit = parseFloat((block[1].match(/<Unit>([\d.]+)<\/Unit>/) || [])[1] || "1");
+  const sellStr = (block[1].match(/<ForexSelling>([\d.,]+)<\/ForexSelling>/) || [])[1];
+  if (!sellStr) throw new Error("TCMB satış kuru bulunamadı");
+  const sell = parseFloat(sellStr.replace(",", "."));
+  if (!sell) throw new Error("TCMB kuru geçersiz");
+  return sell / unit;
 }
 
 router.get("/geocode", async (req, res) => {
@@ -94,20 +122,48 @@ router.get("/fx", async (req, res) => {
   const cached = cacheGet(key);
   if (cached) return res.json({ ...cached, cached: true });
   try {
-    const curUrl = `https://restcountries.com/v3.1/name/${encodeURIComponent(country)}?fields=currencies,name`;
-    const curData = await fetchJson(curUrl);
-    const arr = Array.isArray(curData) ? curData : [curData];
-    const match = arr.find(c => (c.name?.common || "").toLocaleLowerCase("tr-TR") === country.toLocaleLowerCase("tr-TR")) || arr[0];
-    const code = Object.keys(match.currencies || {})[0];
-    if (!code) return res.status(404).json({ error: "Para birimi bulunamadı" });
-    let rate = 1, inverse = 1;
-    if (code !== "TRY") {
-      const rateData = await fetchJson(`https://api.frankfurter.app/latest?from=${code}&to=TRY`);
-      rate = rateData.rates?.TRY;
-      if (!rate) return res.status(502).json({ error: "Kur bulunamadı" });
-      inverse = 1 / rate;
+    let code = lookupCurrency(country);
+    if (!code) {
+      // Not in the static table (uncommon country) — try the live lookup as
+      // a secondary attempt only, since it's known to be occasionally flaky.
+      try {
+        const curUrl = `https://restcountries.com/v3.1/name/${encodeURIComponent(country)}?fields=currencies,name`;
+        const curData = await fetchJson(curUrl);
+        const arr = Array.isArray(curData) ? curData : [curData];
+        const match = arr.find(c => (c.name?.common || "").toLocaleLowerCase("tr-TR") === country.toLocaleLowerCase("tr-TR")) || arr[0];
+        code = Object.keys(match.currencies || {})[0];
+      } catch { /* fall through to 404 below */ }
     }
-    const out = { code, rate, inverse };
+    if (!code) return res.status(404).json({ error: "Para birimi bulunamadı" });
+    if (code === "TRY") {
+      const out = { code, rate: 1, inverse: 1, source: "TRY" };
+      cacheSet(key, out, FX_TTL);
+      return res.json(out);
+    }
+    let rate, source;
+    try {
+      rate = await fetchTcmbRate(code);
+      source = "TCMB";
+    } catch {
+      // TCMB doesn't list every currency (mainly majors) and can occasionally
+      // be unreachable — three independent, architecturally different rate
+      // sources raced in parallel as a fallback. The jsDelivr one isn't a
+      // live API at all — it's a static JSON file on a CDN (the same
+      // infrastructure npm packages are served from), updated daily via
+      // GitHub Actions, which is far harder to rate-limit/block than a
+      // normal API server.
+      const lc = code.toLowerCase();
+      rate = await Promise.any([
+        fetchJson(`https://api.frankfurter.app/latest?from=${code}&to=TRY`, {}, 8000)
+          .then(d => d.rates?.TRY).then(r => { if (!r) throw new Error("no rate"); return r; }),
+        fetchJson(`https://open.er-api.com/v6/latest/${code}`, {}, 8000)
+          .then(d => d.rates?.TRY).then(r => { if (!r) throw new Error("no rate"); return r; }),
+        fetchJson(`https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/${lc}.json`, {}, 8000)
+          .then(d => d[lc]?.try).then(r => { if (!r) throw new Error("no rate"); return r; }),
+      ]);
+      source = "diger";
+    }
+    const out = { code, rate, inverse: 1 / rate, source };
     cacheSet(key, out, FX_TTL);
     res.json(out);
   } catch (e) {
@@ -123,29 +179,60 @@ router.get("/poi", async (req, res) => {
     const cached = cacheGet(key);
     if (cached) return res.json({ ...cached, cached: true });
   }
-  const query = `[out:json][timeout:25];(
+  const query = `[out:json][timeout:20];(
     node["amenity"="restaurant"](around:5000,${lat},${lon});
     node["amenity"="cafe"](around:5000,${lat},${lon});
+    node["amenity"="bar"](around:5000,${lat},${lon});
+    node["amenity"="pub"](around:5000,${lat},${lon});
     node["tourism"="museum"](around:5000,${lat},${lon});
-    node["shop"~"mall|department_store|clothes|gift|general"](around:5000,${lat},${lon});
-  );out body 150;`;
-  const endpoints = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"];
-  for (const ep of endpoints) {
+    node["tourism"="attraction"](around:5000,${lat},${lon});
+    node["tourism"="hotel"](around:5000,${lat},${lon});
+    node["tourism"="hostel"](around:5000,${lat},${lon});
+    node["tourism"="guest_house"](around:5000,${lat},${lon});
+    node["shop"~"mall|department_store|clothes|general"](around:5000,${lat},${lon});
+    node["shop"~"gift|souvenir"](around:5000,${lat},${lon});
+  );out body 250;`;
+  const endpoints = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter", "https://overpass.openstreetmap.ru/api/interpreter"];
+  try {
+    // Race instead of sequential: whichever mirror answers first wins, so one
+    // slow/overloaded instance (a well-documented issue with free Overpass
+    // servers) no longer burns its full timeout before the next is even tried.
+    const data = await Promise.any(
+      endpoints.map(ep => fetchJson(ep, { method: "POST", body: "data=" + encodeURIComponent(query) }, 7000))
+    );
+    const cats = { restaurant: [], cafe: [], bar: [], museum: [], attraction: [], lodging: [], shopping: [], gift: [] };
+    for (const el of data.elements || []) {
+      const name = el.tags?.name;
+      if (!name) continue;
+      if (el.tags.amenity === "restaurant") cats.restaurant.push(name);
+      else if (el.tags.amenity === "cafe") cats.cafe.push(name);
+      else if (el.tags.amenity === "bar" || el.tags.amenity === "pub") cats.bar.push(name);
+      else if (el.tags.tourism === "museum") cats.museum.push(name);
+      else if (el.tags.tourism === "attraction") cats.attraction.push(name);
+      else if (["hotel", "hostel", "guest_house"].includes(el.tags.tourism)) cats.lodging.push(name);
+      else if (el.tags.shop === "gift" || el.tags.shop === "souvenir") cats.gift.push(name);
+      else if (el.tags.shop) cats.shopping.push(name);
+    }
+    Object.keys(cats).forEach(k => cats[k] = [...new Set(cats[k])].slice(0, 30));
+    cacheSet(key, cats, POI_TTL);
+    return res.json(cats);
+  } catch { /* every Overpass mirror failed — try a wholly independent source below */
     try {
-      const data = await fetchJson(ep, { method: "POST", body: "data=" + encodeURIComponent(query) }, 15000);
-      const cats = { restaurant: [], cafe: [], museum: [], shopping: [] };
-      for (const el of data.elements || []) {
-        const name = el.tags?.name;
-        if (!name) continue;
-        if (el.tags.amenity === "restaurant") cats.restaurant.push(name);
-        else if (el.tags.amenity === "cafe") cats.cafe.push(name);
-        else if (el.tags.tourism === "museum") cats.museum.push(name);
-        else if (el.tags.shop) cats.shopping.push(name);
+      // Wikipedia runs on entirely different infrastructure than the OSM/
+      // Overpass ecosystem, so if all three Overpass mirrors are down/
+      // throttled together (they can share upstream issues), this is a
+      // genuinely separate fallback rather than another flavor of the same
+      // failure. It only covers landmarks/points of interest (Wikipedia has
+      // no restaurant/cafe data), so those categories stay empty here.
+      const wikiUrl = `https://en.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${lat}|${lon}&gsradius=8000&gslimit=25&format=json&origin=*`;
+      const wikiData = await fetchJson(wikiUrl, {}, 8000);
+      const names = (wikiData.query?.geosearch || []).map(p => p.title);
+      if (names.length) {
+        const cats = { restaurant: [], cafe: [], bar: [], museum: names.slice(0, 15), attraction: names.slice(15, 30), lodging: [], shopping: [], gift: [] };
+        cacheSet(key, cats, POI_TTL);
+        return res.json(cats);
       }
-      Object.keys(cats).forEach(k => cats[k] = [...new Set(cats[k])].slice(0, 30));
-      cacheSet(key, cats, POI_TTL);
-      return res.json(cats);
-    } catch { /* try next endpoint */ }
+    } catch { /* fall through to 502 below */ }
   }
   res.status(502).json({ error: "Yer servisine ulaşılamadı" });
 });

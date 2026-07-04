@@ -35,6 +35,8 @@ export async function initSchema() {
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
+      email TEXT UNIQUE,
+      password_hash TEXT,
       created_at TEXT NOT NULL
     );
 
@@ -81,6 +83,17 @@ export async function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_expenses_trip ON expenses(trip_id);
     CREATE INDEX IF NOT EXISTS idx_hazards_trip ON hazards(trip_id);
   `);
+  // Migration-safe: adds these columns if the table already existed from a
+  // deploy before login support was added, without touching existing rows.
+  await pool.query(`
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_expires TEXT;
+  `);
+  try {
+    await pool.query(`ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)`);
+  } catch { /* constraint already exists — fine, this is the idempotent path */ }
 }
 
 /* ---------------------------- users ---------------------------- */
@@ -92,6 +105,36 @@ export async function createUser(name) {
 export async function getUser(id) {
   const { rows } = await pool.query(`SELECT * FROM users WHERE id = $1`, [id]);
   return rows[0] || null;
+}
+export async function createUserWithPassword(email, passwordHash, name) {
+  const id = randomUUID();
+  await pool.query(
+    `INSERT INTO users (id, name, email, password_hash, created_at) VALUES ($1, $2, $3, $4, $5)`,
+    [id, name, email.toLowerCase(), passwordHash, now()]
+  );
+  return { id, name, email: email.toLowerCase() };
+}
+export async function getUserByEmail(email) {
+  const { rows } = await pool.query(`SELECT * FROM users WHERE email = $1`, [email.toLowerCase()]);
+  return rows[0] || null;
+}
+
+export async function setResetToken(userId, token, expiresAt) {
+  await pool.query(`UPDATE users SET reset_token = $1, reset_token_expires = $2 WHERE id = $3`, [token, expiresAt, userId]);
+}
+export async function getUserByResetToken(token) {
+  const { rows } = await pool.query(`SELECT * FROM users WHERE reset_token = $1`, [token]);
+  return rows[0] || null;
+}
+export async function updatePassword(userId, passwordHash) {
+  await pool.query(
+    `UPDATE users SET password_hash = $1, reset_token = NULL, reset_token_expires = NULL WHERE id = $2`,
+    [passwordHash, userId]
+  );
+}
+export async function updateUserName(userId, name) {
+  await pool.query(`UPDATE users SET name = $1 WHERE id = $2`, [name, userId]);
+  return { id: userId, name };
 }
 
 /* ---------------------------- trips ---------------------------- */
