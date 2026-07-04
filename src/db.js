@@ -69,6 +69,7 @@ export async function initSchema() {
       paid_by TEXT NOT NULL,
       split_among TEXT NOT NULL,
       is_settlement INTEGER NOT NULL DEFAULT 0,
+      receipt_photo TEXT,
       created_at TEXT NOT NULL
     );
 
@@ -92,6 +93,7 @@ export async function initSchema() {
     ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_expires TEXT;
     ALTER TABLE trip_members ADD COLUMN IF NOT EXISTS email TEXT;
+    ALTER TABLE expenses ADD COLUMN IF NOT EXISTS receipt_photo TEXT;
   `);
   try {
     await pool.query(`ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)`);
@@ -165,7 +167,7 @@ export async function getTripFull(tripId) {
   const expenses = expensesRaw.map(e => ({
     id: e.id, desc: e.description, amount: e.amount, category: e.category,
     paidBy: e.paid_by, splitAmong: JSON.parse(e.split_among),
-    isSettlement: !!e.is_settlement, date: e.created_at,
+    isSettlement: !!e.is_settlement, receiptPhoto: e.receipt_photo || null, date: e.created_at,
   }));
   const { rows: hazards } = await pool.query(
     `SELECT id, text, created_at as date FROM hazards WHERE trip_id = $1 ORDER BY created_at DESC`, [tripId]);
@@ -225,12 +227,12 @@ export async function removeMember(tripId, memberId) {
 }
 
 /* --------------------------- expenses ---------------------------- */
-export async function addExpense(tripId, { desc, amount, category, paidBy, splitAmong, isSettlement = false }) {
+export async function addExpense(tripId, { desc, amount, category, paidBy, splitAmong, isSettlement = false, receiptPhoto = null }) {
   const id = randomUUID();
   await pool.query(`
-    INSERT INTO expenses (id, trip_id, description, amount, category, paid_by, split_among, is_settlement, created_at)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-  `, [id, tripId, desc, amount, category || "diger", paidBy, JSON.stringify(splitAmong), isSettlement ? 1 : 0, now()]);
+    INSERT INTO expenses (id, trip_id, description, amount, category, paid_by, split_among, is_settlement, receipt_photo, created_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+  `, [id, tripId, desc, amount, category || "diger", paidBy, JSON.stringify(splitAmong), isSettlement ? 1 : 0, receiptPhoto, now()]);
   return id;
 }
 export async function deleteExpense(tripId, expenseId) {

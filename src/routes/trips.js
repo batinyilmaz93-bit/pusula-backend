@@ -119,11 +119,14 @@ export default function tripsRouter(io) {
   // ---- expenses ----
   router.post("/:id/expenses", h(async (req, res) => {
     if (!(await assertMember(req, res))) return;
-    const { desc, amount, category, paidBy, splitAmong } = req.body || {};
+    const { desc, amount, category, paidBy, splitAmong, receiptPhoto } = req.body || {};
     if (!desc?.trim() || !amount || amount <= 0 || !paidBy || !splitAmong?.length) {
       return res.status(400).json({ error: "Eksik veya geçersiz harcama verisi" });
     }
-    await db.addExpense(req.params.id, { desc: desc.trim(), amount, category, paidBy, splitAmong });
+    if (receiptPhoto && receiptPhoto.length > 4_000_000) {
+      return res.status(400).json({ error: "Fotoğraf çok büyük, daha küçük bir tane dene" });
+    }
+    await db.addExpense(req.params.id, { desc: desc.trim(), amount, category, paidBy, splitAmong, receiptPhoto: receiptPhoto || null });
     res.status(201).json(await broadcast(req.params.id));
   }));
 
