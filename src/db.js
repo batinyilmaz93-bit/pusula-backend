@@ -37,6 +37,7 @@ export async function initSchema() {
       name TEXT NOT NULL,
       email TEXT UNIQUE,
       phone TEXT,
+      avatar_photo TEXT,
       password_hash TEXT,
       created_at TEXT NOT NULL
     );
@@ -82,6 +83,14 @@ export async function initSchema() {
       created_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS trip_photos (
+      id TEXT PRIMARY KEY,
+      trip_id TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+      photo TEXT NOT NULL,
+      uploaded_by TEXT,
+      created_at TEXT NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_members_trip ON trip_members(trip_id);
     CREATE INDEX IF NOT EXISTS idx_expenses_trip ON expenses(trip_id);
     CREATE INDEX IF NOT EXISTS idx_hazards_trip ON hazards(trip_id);
@@ -96,6 +105,7 @@ export async function initSchema() {
     ALTER TABLE trip_members ADD COLUMN IF NOT EXISTS email TEXT;
     ALTER TABLE expenses ADD COLUMN IF NOT EXISTS receipt_photo TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_photo TEXT;
   `);
   try {
     await pool.query(`ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)`);
@@ -138,11 +148,12 @@ export async function updatePassword(userId, passwordHash) {
     [passwordHash, userId]
   );
 }
-export async function updateUserProfile(userId, { name, phone, email }) {
+export async function updateUserProfile(userId, { name, phone, email, avatarPhoto }) {
   const sets = []; const vals = []; let i = 1;
   if (name !== undefined) { sets.push(`name = $${i++}`); vals.push(name); }
   if (phone !== undefined) { sets.push(`phone = $${i++}`); vals.push(phone || null); }
   if (email !== undefined) { sets.push(`email = $${i++}`); vals.push(email || null); }
+  if (avatarPhoto !== undefined) { sets.push(`avatar_photo = $${i++}`); vals.push(avatarPhoto || null); }
   if (sets.length === 0) return getUser(userId);
   vals.push(userId);
   await pool.query(`UPDATE users SET ${sets.join(", ")} WHERE id = $${i}`, vals);
@@ -169,7 +180,9 @@ export async function getTripFull(tripId) {
   const trip = tripRows[0];
   if (!trip) return null;
   const { rows: members } = await pool.query(
-    `SELECT id, user_id as "userId", name, email FROM trip_members WHERE trip_id = $1 ORDER BY created_at ASC`, [tripId]);
+    `SELECT tm.id, tm.user_id as "userId", tm.name, tm.email, u.avatar_photo as "avatarPhoto"
+     FROM trip_members tm LEFT JOIN users u ON u.id = tm.user_id
+     WHERE tm.trip_id = $1 ORDER BY tm.created_at ASC`, [tripId]);
   const { rows: expensesRaw } = await pool.query(
     `SELECT * FROM expenses WHERE trip_id = $1 ORDER BY created_at DESC`, [tripId]);
   const expenses = expensesRaw.map(e => ({
@@ -179,10 +192,12 @@ export async function getTripFull(tripId) {
   }));
   const { rows: hazards } = await pool.query(
     `SELECT id, text, created_at as date FROM hazards WHERE trip_id = $1 ORDER BY created_at DESC`, [tripId]);
+  const { rows: photos } = await pool.query(
+    `SELECT id, photo, uploaded_by as "uploadedBy", created_at as date FROM trip_photos WHERE trip_id = $1 ORDER BY created_at ASC`, [tripId]);
   return {
     id: trip.id, name: trip.name, country: trip.country, city: trip.city,
     currencyCode: trip.currency_code, admin: trip.admin_member_id, inviteCode: trip.invite_code,
-    members, expenses, hazards, createdAt: trip.created_at,
+    members, expenses, hazards, photos, createdAt: trip.created_at,
   };
 }
 
@@ -245,6 +260,23 @@ export async function addExpense(tripId, { desc, amount, category, paidBy, split
 }
 export async function deleteExpense(tripId, expenseId) {
   await pool.query(`DELETE FROM expenses WHERE id = $1 AND trip_id = $2`, [expenseId, tripId]);
+}
+
+/* --------------------------- trip photos ---------------------------- */
+export async function countTripPhotos(tripId) {
+  const { rows } = await pool.query(`SELECT COUNT(*)::int AS count FROM trip_photos WHERE trip_id = $1`, [tripId]);
+  return rows[0].count;
+}
+export async function addTripPhoto(tripId, { photo, uploadedBy }) {
+  const id = randomUUID();
+  await pool.query(
+    `INSERT INTO trip_photos (id, trip_id, photo, uploaded_by, created_at) VALUES ($1, $2, $3, $4, $5)`,
+    [id, tripId, photo, uploadedBy || null, now()]
+  );
+  return id;
+}
+export async function deleteTripPhoto(tripId, photoId) {
+  await pool.query(`DELETE FROM trip_photos WHERE id = $1 AND trip_id = $2`, [photoId, tripId]);
 }
 
 /* --------------------------- hazards ---------------------------- */

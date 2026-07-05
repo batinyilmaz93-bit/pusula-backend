@@ -28,7 +28,7 @@ export async function registerWithPassword(email, password, name) {
   if (password.length < 6) throw new Error("Şifre en az 6 karakter olmalı.");
   const hash = await bcrypt.hash(password, 10);
   const user = await createUserWithPassword(email, hash, name);
-  return { token: sign(user), user: { id: user.id, name: user.name, email: user.email, phone: user.phone } };
+  return { token: sign(user), user: { id: user.id, name: user.name, email: user.email, phone: user.phone, avatarPhoto: user.avatar_photo } };
 }
 
 export async function loginWithPassword(email, password) {
@@ -36,7 +36,7 @@ export async function loginWithPassword(email, password) {
   if (!user || !user.password_hash) throw new Error("E-posta veya şifre hatalı.");
   const ok = await bcrypt.compare(password, user.password_hash);
   if (!ok) throw new Error("E-posta veya şifre hatalı.");
-  return { token: sign(user), user: { id: user.id, name: user.name, email: user.email, phone: user.phone } };
+  return { token: sign(user), user: { id: user.id, name: user.name, email: user.email, phone: user.phone, avatarPhoto: user.avatar_photo } };
 }
 
 // Always returns the same generic result whether or not the email exists —
@@ -70,13 +70,13 @@ export async function confirmPasswordReset(token, newPassword) {
   if (new Date(user.reset_token_expires) < new Date()) throw new Error("Bu bağlantının süresi dolmuş, yeniden şifre sıfırlama iste.");
   const hash = await bcrypt.hash(newPassword, 10);
   await updatePassword(user.id, hash);
-  return { token: sign(user), user: { id: user.id, name: user.name, email: user.email, phone: user.phone } };
+  return { token: sign(user), user: { id: user.id, name: user.name, email: user.email, phone: user.phone, avatarPhoto: user.avatar_photo } };
 }
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PHONE_RE = /^[0-9+()\s-]{7,20}$/;
 
-export async function updateProfile(userId, { name, phone, email } = {}) {
+export async function updateProfile(userId, { name, phone, email, avatarPhoto } = {}) {
   const patch = {};
   if (name !== undefined) {
     if (!name?.trim()) throw new Error("İsim boş olamaz.");
@@ -95,6 +95,10 @@ export async function updateProfile(userId, { name, phone, email } = {}) {
       if (existing && existing.id !== userId) throw new Error("Bu e-posta başka bir hesapta kullanılıyor.");
     }
     patch.email = trimmed || null;
+  }
+  if (avatarPhoto !== undefined) {
+    if (avatarPhoto && avatarPhoto.length > 3_000_000) throw new Error("Fotoğraf çok büyük.");
+    patch.avatarPhoto = avatarPhoto || null;
   }
   return updateUserProfile(userId, patch);
 }

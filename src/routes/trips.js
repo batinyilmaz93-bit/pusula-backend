@@ -149,6 +149,23 @@ export default function tripsRouter(io) {
     res.json(await broadcast(req.params.id));
   }));
 
+  router.post("/:id/photos", h(async (req, res) => {
+    if (!(await assertMember(req, res))) return;
+    const { photo } = req.body || {};
+    if (!photo) return res.status(400).json({ error: "Fotoğraf gerekli" });
+    if (photo.length > 3_000_000) return res.status(400).json({ error: "Fotoğraf çok büyük" });
+    const count = await db.countTripPhotos(req.params.id);
+    if (count >= 5) return res.status(400).json({ error: "Bu seyahat için en fazla 5 fotoğraf yüklenebilir" });
+    await db.addTripPhoto(req.params.id, { photo, uploadedBy: req.userId });
+    res.status(201).json(await broadcast(req.params.id));
+  }));
+
+  router.delete("/:id/photos/:photoId", h(async (req, res) => {
+    if (!(await assertMember(req, res))) return;
+    await db.deleteTripPhoto(req.params.id, req.params.photoId);
+    res.json(await broadcast(req.params.id));
+  }));
+
   // ---- hazards (community safety notes) ----
   router.post("/:id/hazards", h(async (req, res) => {
     if (!(await assertMember(req, res))) return;
