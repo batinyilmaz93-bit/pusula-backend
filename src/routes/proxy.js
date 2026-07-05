@@ -221,13 +221,20 @@ router.get("/poi", async (req, res) => {
   async function fetchGeoapify() {
     const apiKey = process.env.GEOAPIFY_API_KEY;
     if (!apiKey) throw new Error("Geoapify not configured");
+    // Broadened from narrow subcategories (e.g. only "accommodation.hotel")
+    // to their parent categories — Geoapify nests many subtypes under each
+    // (apartments, chalets, department stores, marketplaces, etc.) that the
+    // narrow list was silently missing, which is why lodging/shopping were
+    // coming back thin even with a working key. Also uses a bigger radius
+    // than Overpass (8km vs 4km) since Geoapify isn't at risk of the same
+    // blocking/timeout issues that keep the OSM query radius conservative.
     const categories = [
       "catering.restaurant", "catering.cafe", "catering.bar", "catering.pub",
-      "entertainment.museum", "tourism.sights",
-      "accommodation.hotel", "accommodation.hostel", "accommodation.guest_house",
-      "commercial.gift_and_souvenir", "commercial.shopping_mall",
+      "entertainment.museum", "entertainment.culture", "tourism.sights",
+      "accommodation",
+      "commercial.gift_and_souvenir", "commercial",
     ].join(",");
-    const url = `https://api.geoapify.com/v2/places?categories=${categories}&filter=circle:${lon},${lat},4000&limit=100&apiKey=${apiKey}`;
+    const url = `https://api.geoapify.com/v2/places?categories=${categories}&filter=circle:${lon},${lat},8000&limit=150&apiKey=${apiKey}`;
     const data = await fetchJson(url, {}, 10000);
     const cats = { restaurant: [], cafe: [], bar: [], museum: [], attraction: [], lodging: [], shopping: [], gift: [] };
     for (const f of data.features || []) {
@@ -238,11 +245,11 @@ router.get("/poi", async (req, res) => {
       if (c.includes("catering.restaurant")) cats.restaurant.push(name);
       else if (c.includes("catering.cafe")) cats.cafe.push(name);
       else if (c.some(x => x === "catering.bar" || x === "catering.pub")) cats.bar.push(name);
-      else if (c.includes("entertainment.museum")) cats.museum.push(name);
+      else if (c.some(x => x === "entertainment.museum" || x === "entertainment.culture")) cats.museum.push(name);
       else if (c.includes("tourism.sights")) cats.attraction.push(name);
-      else if (c.some(x => x.startsWith("accommodation."))) cats.lodging.push(name);
+      else if (c.some(x => x.startsWith("accommodation"))) cats.lodging.push(name);
       else if (c.includes("commercial.gift_and_souvenir")) cats.gift.push(name);
-      else if (c.some(x => x.startsWith("commercial."))) cats.shopping.push(name);
+      else if (c.some(x => x.startsWith("commercial"))) cats.shopping.push(name);
     }
     Object.keys(cats).forEach(k => cats[k] = [...new Set(cats[k])].slice(0, 30));
     return { ...cats, _source: "geoapify" };
