@@ -13,6 +13,14 @@ export default function tripsRouter(io) {
     return fresh;
   };
 
+  // Distinct from broadcast(): this is specifically for events that should
+  // trigger a user-facing notification (toast + sound), not every data
+  // refresh. The frontend also uses actorUserId to skip notifying whoever
+  // just performed the action themselves.
+  const notify = (tripId, { type, title, body, actorUserId }) => {
+    io.to(`trip:${tripId}`).emit("trip:notify", { type, title, body, actorUserId, tripId, at: new Date().toISOString() });
+  };
+
   const assertMember = async (req, res) => {
     if (!(await db.isTripMember(req.params.id, req.userId))) {
       res.status(403).json({ error: "Bu seyahatin üyesi değilsin" });
@@ -50,10 +58,15 @@ export default function tripsRouter(io) {
     const { inviteCode } = req.body || {};
     const trip = await db.findTripByInvite((inviteCode || "").toUpperCase().trim());
     if (!trip) return res.status(404).json({ error: "Davet kodu geçersiz" });
-    if (!(await db.isTripMember(trip.id, req.userId))) {
+    const alreadyMember = await db.isTripMember(trip.id, req.userId);
+    if (!alreadyMember) {
       await db.addMember(trip.id, { userId: req.userId, name: req.userName });
     }
-    res.json(await broadcast(trip.id));
+    const fresh = await broadcast(trip.id);
+    if (!alreadyMember) {
+      notify(trip.id, { type: "member_joined", title: "Yeni üye katıldı", body: `${req.userName} seyahate katıldı`, actorUserId: req.userId });
+    }
+    res.json(fresh);
   }));
 
   router.get("/:id", h(async (req, res) => {
@@ -127,7 +140,9 @@ export default function tripsRouter(io) {
       return res.status(400).json({ error: "Fotoğraf çok büyük, daha küçük bir tane dene" });
     }
     await db.addExpense(req.params.id, { desc: desc.trim(), amount, category, paidBy, splitAmong, receiptPhoto: receiptPhoto || null });
-    res.status(201).json(await broadcast(req.params.id));
+    const fresh = await broadcast(req.params.id);
+    notify(req.params.id, { type: "expense_added", title: "Yeni harcama", body: `${req.userName}: "${desc.trim()}" — ${amount} eklendi`, actorUserId: req.userId });
+    res.status(201).json(fresh);
   }));
 
   router.post("/:id/settle", h(async (req, res) => {
@@ -140,7 +155,9 @@ export default function tripsRouter(io) {
       desc: `Ödeme: ${nameOf(from)} → ${nameOf(to)}`, amount, category: "diger",
       paidBy: from, splitAmong: [to], isSettlement: true,
     });
-    res.status(201).json(await broadcast(req.params.id));
+    const fresh = await broadcast(req.params.id);
+    notify(req.params.id, { type: "payment_made", title: "Ödeme yapıldı", body: `${nameOf(from)}, ${nameOf(to)}'ya ${amount} ödedi`, actorUserId: req.userId });
+    res.status(201).json(fresh);
   }));
 
   router.delete("/:id/expenses/:expenseId", h(async (req, res) => {
