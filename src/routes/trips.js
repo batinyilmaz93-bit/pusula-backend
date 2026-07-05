@@ -166,6 +166,38 @@ export default function tripsRouter(io) {
     res.json(await broadcast(req.params.id));
   }));
 
+  router.get("/:id/messages", h(async (req, res) => {
+    if (!(await assertMember(req, res))) return;
+    const messages = await db.getMessages(req.params.id);
+    res.json({ messages });
+  }));
+
+  router.post("/:id/messages", h(async (req, res) => {
+    if (!(await assertMember(req, res))) return;
+    const trip = await db.getTripFull(req.params.id);
+    const me = trip.members.find(m => m.userId === req.userId);
+    if (!me) return res.status(403).json({ error: "Bu seyahatin üyesi değilsin" });
+
+    const { kind, text, lat, lon } = req.body || {};
+    if (kind === "location") {
+      if (typeof lat !== "number" || typeof lon !== "number") {
+        return res.status(400).json({ error: "Konum bilgisi geçersiz" });
+      }
+    } else if (!text?.trim()) {
+      return res.status(400).json({ error: "Mesaj boş olamaz" });
+    }
+    const message = await db.addMessage(req.params.id, {
+      senderMemberId: me.id, senderName: me.name,
+      kind: kind === "location" ? "location" : "text",
+      text: text?.trim(), lat, lon,
+    });
+    // Chat is high-frequency — push just the new message over the socket
+    // instead of re-broadcasting (and every client re-fetching) the whole
+    // trip object the way other mutations do.
+    io.to(`trip:${req.params.id}`).emit("trip:message", message);
+    res.status(201).json(message);
+  }));
+
   // ---- hazards (community safety notes) ----
   router.post("/:id/hazards", h(async (req, res) => {
     if (!(await assertMember(req, res))) return;

@@ -91,6 +91,19 @@ export async function initSchema() {
       created_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS trip_messages (
+      id TEXT PRIMARY KEY,
+      trip_id TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+      sender_member_id TEXT NOT NULL,
+      sender_name TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'text',
+      text TEXT,
+      lat DOUBLE PRECISION,
+      lon DOUBLE PRECISION,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_messages_trip ON trip_messages(trip_id);
+
     CREATE INDEX IF NOT EXISTS idx_members_trip ON trip_members(trip_id);
     CREATE INDEX IF NOT EXISTS idx_expenses_trip ON expenses(trip_id);
     CREATE INDEX IF NOT EXISTS idx_hazards_trip ON hazards(trip_id);
@@ -277,6 +290,26 @@ export async function addTripPhoto(tripId, { photo, uploadedBy }) {
 }
 export async function deleteTripPhoto(tripId, photoId) {
   await pool.query(`DELETE FROM trip_photos WHERE id = $1 AND trip_id = $2`, [photoId, tripId]);
+}
+
+/* --------------------------- chat messages ---------------------------- */
+export async function getMessages(tripId, limit = 100) {
+  const { rows } = await pool.query(
+    `SELECT id, sender_member_id as "senderMemberId", sender_name as "senderName",
+            kind, text, lat, lon, created_at as "createdAt"
+     FROM trip_messages WHERE trip_id = $1 ORDER BY created_at ASC LIMIT $2`,
+    [tripId, limit]
+  );
+  return rows;
+}
+export async function addMessage(tripId, { senderMemberId, senderName, kind, text, lat, lon }) {
+  const id = randomUUID();
+  await pool.query(
+    `INSERT INTO trip_messages (id, trip_id, sender_member_id, sender_name, kind, text, lat, lon, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [id, tripId, senderMemberId, senderName, kind, text || null, lat ?? null, lon ?? null, now()]
+  );
+  return { id, tripId, senderMemberId, senderName, kind, text: text || null, lat: lat ?? null, lon: lon ?? null, createdAt: now() };
 }
 
 /* --------------------------- hazards ---------------------------- */
