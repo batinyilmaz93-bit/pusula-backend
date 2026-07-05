@@ -193,13 +193,8 @@ router.get("/poi", async (req, res) => {
     node["shop"~"gift|souvenir"](around:4000,${lat},${lon});
   );out body 180;`;
   const endpoints = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter", "https://overpass.openstreetmap.ru/api/interpreter"];
-  try {
-    // Race instead of sequential: whichever mirror answers first wins, so one
-    // slow/overloaded instance (a well-documented issue with free Overpass
-    // servers) no longer burns its full timeout before the next is even tried.
-    const data = await Promise.any(
-      endpoints.map(ep => fetchJson(ep, { method: "POST", body: "data=" + encodeURIComponent(query) }, 16000))
-    );
+
+  function categorizeOverpass(data) {
     const cats = { restaurant: [], cafe: [], bar: [], museum: [], attraction: [], lodging: [], shopping: [], gift: [] };
     for (const el of data.elements || []) {
       const name = el.tags?.name;
@@ -214,21 +209,77 @@ router.get("/poi", async (req, res) => {
       else if (el.tags.shop) cats.shopping.push(name);
     }
     Object.keys(cats).forEach(k => cats[k] = [...new Set(cats[k])].slice(0, 30));
+    return { ...cats, _source: "overpass" };
+  }
+
+  // Geoapify Places — a key-based alternative to Overpass. Free tier (no
+  // credit card): https://myprojects.geoapify.com. Unlike keyless Overpass,
+  // a per-key API is far less likely to be blanket-blocked for a whole
+  // hosting provider's IP range, since abuse is tied to individual keys
+  // rather than shared anonymous traffic. Only participates in the race
+  // below if GEOAPIFY_API_KEY is actually set.
+  async function fetchGeoapify() {
+    const apiKey = process.env.GEOAPIFY_API_KEY;
+    if (!apiKey) throw new Error("Geoapify not configured");
+    const categories = [
+      "catering.restaurant", "catering.cafe", "catering.bar", "catering.pub",
+      "entertainment.museum", "tourism.sights",
+      "accommodation.hotel", "accommodation.hostel", "accommodation.guest_house",
+      "commercial.gift_and_souvenir", "commercial.shopping_mall",
+    ].join(",");
+    const url = `https://api.geoapify.com/v2/places?categories=${categories}&filter=circle:${lon},${lat},4000&limit=100&apiKey=${apiKey}`;
+    const data = await fetchJson(url, {}, 10000);
+    const cats = { restaurant: [], cafe: [], bar: [], museum: [], attraction: [], lodging: [], shopping: [], gift: [] };
+    for (const f of data.features || []) {
+      const p = f.properties || {};
+      const name = p.name;
+      if (!name) continue;
+      const c = p.categories || [];
+      if (c.includes("catering.restaurant")) cats.restaurant.push(name);
+      else if (c.includes("catering.cafe")) cats.cafe.push(name);
+      else if (c.some(x => x === "catering.bar" || x === "catering.pub")) cats.bar.push(name);
+      else if (c.includes("entertainment.museum")) cats.museum.push(name);
+      else if (c.includes("tourism.sights")) cats.attraction.push(name);
+      else if (c.some(x => x.startsWith("accommodation."))) cats.lodging.push(name);
+      else if (c.includes("commercial.gift_and_souvenir")) cats.gift.push(name);
+      else if (c.some(x => x.startsWith("commercial."))) cats.shopping.push(name);
+    }
+    Object.keys(cats).forEach(k => cats[k] = [...new Set(cats[k])].slice(0, 30));
+    return { ...cats, _source: "geoapify" };
+  }
+
+  try {
+    // Race every available source at once — whichever answers first (and
+    // isn't blocked) wins. Geoapify only enters the race if a key is set.
+    const racers = endpoints.map(ep =>
+      fetchJson(ep, { method: "POST", body: "data=" + encodeURIComponent(query) }, 16000).then(categorizeOverpass)
+    );
+    racers.push(fetchGeoapify());
+    const cats = await Promise.any(racers);
     cacheSet(key, cats, POI_TTL);
     return res.json(cats);
-  } catch { /* every Overpass mirror failed — try a wholly independent source below */
+  } catch { /* every source failed — try Wikipedia as a last, partial resort */
     try {
       // Wikipedia runs on entirely different infrastructure than the OSM/
       // Overpass ecosystem, so if all three Overpass mirrors are down/
       // throttled together (they can share upstream issues), this is a
       // genuinely separate fallback rather than another flavor of the same
-      // failure. It only covers landmarks/points of interest (Wikipedia has
-      // no restaurant/cafe data), so those categories stay empty here.
-      const wikiUrl = `https://en.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${lat}|${lon}&gsradius=8000&gslimit=25&format=json&origin=*`;
+      // failure. It only covers landmarks (Wikipedia has no restaurant/cafe
+      // data), so those categories stay empty here. Also: Wikipedia gives us
+      // no way to tell a museum apart from a historical event or a strait,
+      // so we do NOT fake-split results into "museum" vs "attraction" —
+      // that produced things like "Battle of Chios" mislabeled as a museum.
+      // A light keyword filter drops the most obviously non-visitable
+      // articles instead, and everything that passes goes into one
+      // honestly-labeled "attraction" bucket.
+      const wikiUrl = `https://en.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${lat}|${lon}&gsradius=8000&gslimit=30&format=json&origin=*`;
       const wikiData = await fetchJson(wikiUrl, {}, 8000);
-      const names = (wikiData.query?.geosearch || []).map(p => p.title);
+      const EXCLUDE_PATTERN = /\b(battle|war|massacre|strait|siege|earthquake|election|list of|demograph)\b/i;
+      const names = (wikiData.query?.geosearch || [])
+        .map(p => p.title)
+        .filter(t => !EXCLUDE_PATTERN.test(t));
       if (names.length) {
-        const cats = { restaurant: [], cafe: [], bar: [], museum: names.slice(0, 15), attraction: names.slice(15, 30), lodging: [], shopping: [], gift: [] };
+        const cats = { restaurant: [], cafe: [], bar: [], museum: [], attraction: names.slice(0, 30), lodging: [], shopping: [], gift: [] };
         cacheSet(key, cats, POI_TTL);
         return res.json(cats);
       }

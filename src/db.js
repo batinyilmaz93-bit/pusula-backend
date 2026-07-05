@@ -36,6 +36,7 @@ export async function initSchema() {
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       email TEXT UNIQUE,
+      phone TEXT,
       password_hash TEXT,
       created_at TEXT NOT NULL
     );
@@ -94,6 +95,7 @@ export async function initSchema() {
     ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_expires TEXT;
     ALTER TABLE trip_members ADD COLUMN IF NOT EXISTS email TEXT;
     ALTER TABLE expenses ADD COLUMN IF NOT EXISTS receipt_photo TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
   `);
   try {
     await pool.query(`ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)`);
@@ -136,9 +138,15 @@ export async function updatePassword(userId, passwordHash) {
     [passwordHash, userId]
   );
 }
-export async function updateUserName(userId, name) {
-  await pool.query(`UPDATE users SET name = $1 WHERE id = $2`, [name, userId]);
-  return { id: userId, name };
+export async function updateUserProfile(userId, { name, phone, email }) {
+  const sets = []; const vals = []; let i = 1;
+  if (name !== undefined) { sets.push(`name = $${i++}`); vals.push(name); }
+  if (phone !== undefined) { sets.push(`phone = $${i++}`); vals.push(phone || null); }
+  if (email !== undefined) { sets.push(`email = $${i++}`); vals.push(email || null); }
+  if (sets.length === 0) return getUser(userId);
+  vals.push(userId);
+  await pool.query(`UPDATE users SET ${sets.join(", ")} WHERE id = $${i}`, vals);
+  return getUser(userId);
 }
 
 /* ---------------------------- trips ---------------------------- */

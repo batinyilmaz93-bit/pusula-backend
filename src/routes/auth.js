@@ -62,8 +62,9 @@ router.post("/confirm-reset", async (req, res) => {
 
 router.patch("/profile", requireAuth, async (req, res) => {
   try {
-    const user = await updateProfile(req.userId, req.body?.name);
-    res.json({ user });
+    const { name, phone, email } = req.body || {};
+    const user = await updateProfile(req.userId, { name, phone, email });
+    res.json({ user: { id: user.id, name: user.name, email: user.email, phone: user.phone } });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }

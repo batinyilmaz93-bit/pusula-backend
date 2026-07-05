@@ -10,7 +10,7 @@ import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
 import {
   createUser, getUser, createUserWithPassword, getUserByEmail,
-  setResetToken, getUserByResetToken, updatePassword, updateUserName,
+  setResetToken, getUserByResetToken, updatePassword, updateUserProfile,
 } from "./db.js";
 import { sendEmail } from "./email.js";
 
@@ -28,7 +28,7 @@ export async function registerWithPassword(email, password, name) {
   if (password.length < 6) throw new Error("Şifre en az 6 karakter olmalı.");
   const hash = await bcrypt.hash(password, 10);
   const user = await createUserWithPassword(email, hash, name);
-  return { token: sign(user), user: { id: user.id, name: user.name, email: user.email } };
+  return { token: sign(user), user: { id: user.id, name: user.name, email: user.email, phone: user.phone } };
 }
 
 export async function loginWithPassword(email, password) {
@@ -36,7 +36,7 @@ export async function loginWithPassword(email, password) {
   if (!user || !user.password_hash) throw new Error("E-posta veya şifre hatalı.");
   const ok = await bcrypt.compare(password, user.password_hash);
   if (!ok) throw new Error("E-posta veya şifre hatalı.");
-  return { token: sign(user), user: { id: user.id, name: user.name, email: user.email } };
+  return { token: sign(user), user: { id: user.id, name: user.name, email: user.email, phone: user.phone } };
 }
 
 // Always returns the same generic result whether or not the email exists —
@@ -70,12 +70,33 @@ export async function confirmPasswordReset(token, newPassword) {
   if (new Date(user.reset_token_expires) < new Date()) throw new Error("Bu bağlantının süresi dolmuş, yeniden şifre sıfırlama iste.");
   const hash = await bcrypt.hash(newPassword, 10);
   await updatePassword(user.id, hash);
-  return { token: sign(user), user: { id: user.id, name: user.name, email: user.email } };
+  return { token: sign(user), user: { id: user.id, name: user.name, email: user.email, phone: user.phone } };
 }
 
-export async function updateProfile(userId, name) {
-  if (!name?.trim()) throw new Error("İsim gerekli.");
-  return updateUserName(userId, name.trim());
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const PHONE_RE = /^[0-9+()\s-]{7,20}$/;
+
+export async function updateProfile(userId, { name, phone, email } = {}) {
+  const patch = {};
+  if (name !== undefined) {
+    if (!name?.trim()) throw new Error("İsim boş olamaz.");
+    patch.name = name.trim();
+  }
+  if (phone !== undefined) {
+    const trimmed = phone?.trim() || "";
+    if (trimmed && !PHONE_RE.test(trimmed)) throw new Error("Telefon numarası geçersiz görünüyor.");
+    patch.phone = trimmed || null;
+  }
+  if (email !== undefined) {
+    const trimmed = email?.trim().toLowerCase() || "";
+    if (trimmed) {
+      if (!EMAIL_RE.test(trimmed)) throw new Error("E-posta adresi geçersiz görünüyor.");
+      const existing = await getUserByEmail(trimmed);
+      if (existing && existing.id !== userId) throw new Error("Bu e-posta başka bir hesapta kullanılıyor.");
+    }
+    patch.email = trimmed || null;
+  }
+  return updateUserProfile(userId, patch);
 }
 
 export async function requireAuth(req, res, next) {
