@@ -59,6 +59,7 @@ export async function initSchema() {
       user_id TEXT REFERENCES users(id),
       name TEXT NOT NULL,
       email TEXT,
+      role TEXT NOT NULL DEFAULT 'editor',
       created_at TEXT NOT NULL
     );
 
@@ -100,9 +101,22 @@ export async function initSchema() {
       text TEXT,
       lat DOUBLE PRECISION,
       lon DOUBLE PRECISION,
+      live BOOLEAN NOT NULL DEFAULT false,
+      photo TEXT,
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_messages_trip ON trip_messages(trip_id);
+
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      endpoint TEXT NOT NULL UNIQUE,
+      p256dh TEXT NOT NULL,
+      auth TEXT NOT NULL,
+      prefs TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions(user_id);
 
     CREATE INDEX IF NOT EXISTS idx_members_trip ON trip_members(trip_id);
     CREATE INDEX IF NOT EXISTS idx_expenses_trip ON expenses(trip_id);
@@ -116,9 +130,12 @@ export async function initSchema() {
     ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_expires TEXT;
     ALTER TABLE trip_members ADD COLUMN IF NOT EXISTS email TEXT;
+    ALTER TABLE trip_members ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'editor';
     ALTER TABLE expenses ADD COLUMN IF NOT EXISTS receipt_photo TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_photo TEXT;
+    ALTER TABLE trip_messages ADD COLUMN IF NOT EXISTS photo TEXT;
+    ALTER TABLE trip_messages ADD COLUMN IF NOT EXISTS live BOOLEAN NOT NULL DEFAULT false;
   `);
   try {
     await pool.query(`ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)`);
@@ -193,7 +210,7 @@ export async function getTripFull(tripId) {
   const trip = tripRows[0];
   if (!trip) return null;
   const { rows: members } = await pool.query(
-    `SELECT tm.id, tm.user_id as "userId", tm.name, tm.email, u.avatar_photo as "avatarPhoto"
+    `SELECT tm.id, tm.user_id as "userId", tm.name, tm.email, tm.role, u.avatar_photo as "avatarPhoto"
      FROM trip_members tm LEFT JOIN users u ON u.id = tm.user_id
      WHERE tm.trip_id = $1 ORDER BY tm.created_at ASC`, [tripId]);
   const { rows: expensesRaw } = await pool.query(
@@ -242,12 +259,72 @@ export async function isTripMember(tripId, userId) {
   return rows.length > 0;
 }
 
+/* --------------------------- account deletion / export ---------------------------- */
+// Deleting an account shouldn't corrupt other members' shared expense
+// history — if this user is the sole member of a trip, the whole trip goes
+// with them; otherwise their membership is detached (name kept, marked as
+// a deleted account) so past expenses/messages still make sense to the
+// people who stay. Admin duties get handed to the next-oldest member first.
+export async function deleteUserAccount(userId) {
+  const { rows: memberships } = await pool.query(
+    `SELECT tm.id as member_id, tm.trip_id, t.admin_member_id
+     FROM trip_members tm JOIN trips t ON t.id = tm.trip_id WHERE tm.user_id = $1`,
+    [userId]
+  );
+  for (const m of memberships) {
+    const { rows: others } = await pool.query(
+      `SELECT id FROM trip_members WHERE trip_id = $1 AND id != $2 ORDER BY created_at ASC`,
+      [m.trip_id, m.member_id]
+    );
+    if (others.length === 0) {
+      await pool.query(`DELETE FROM trips WHERE id = $1`, [m.trip_id]); // cascades members/expenses/messages/photos/hazards
+    } else {
+      if (m.admin_member_id === m.member_id) {
+        await pool.query(`UPDATE trips SET admin_member_id = $1 WHERE id = $2`, [others[0].id, m.trip_id]);
+      }
+      await pool.query(
+        `UPDATE trip_members SET user_id = NULL, name = name || ' (hesap silindi)' WHERE id = $1`,
+        [m.member_id]
+      );
+    }
+  }
+  await pool.query(`DELETE FROM users WHERE id = $1`, [userId]);
+}
+
+export async function exportUserData(userId) {
+  const user = await getUser(userId);
+  const { rows: trips } = await pool.query(
+    `SELECT t.id, t.name, t.country, t.city, t.currency_code as "currencyCode", t.created_at as "createdAt"
+     FROM trips t JOIN trip_members tm ON tm.trip_id = t.id WHERE tm.user_id = $1`,
+    [userId]
+  );
+  const { rows: messages } = await pool.query(
+    `SELECT tmsg.text, tmsg.kind, tmsg.lat, tmsg.lon, tmsg.created_at as "createdAt", tmsg.trip_id as "tripId"
+     FROM trip_messages tmsg JOIN trip_members m ON m.id = tmsg.sender_member_id WHERE m.user_id = $1
+     ORDER BY tmsg.created_at ASC`,
+    [userId]
+  );
+  return {
+    profile: { name: user.name, email: user.email, phone: user.phone, createdAt: user.created_at },
+    trips, messages,
+    exportedAt: now(),
+  };
+}
+
 /* --------------------------- members ---------------------------- */
-export async function addMember(tripId, { userId = null, name, email = null }) {
+export async function addMember(tripId, { userId = null, name, email = null, role = "editor" }) {
   const id = randomUUID();
-  await pool.query(`INSERT INTO trip_members (id, trip_id, user_id, name, email, created_at) VALUES ($1, $2, $3, $4, $5, $6)`,
-    [id, tripId, userId, name, email, now()]);
-  return { id, userId, name, email };
+  await pool.query(`INSERT INTO trip_members (id, trip_id, user_id, name, email, role, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [id, tripId, userId, name, email, role, now()]);
+  return { id, userId, name, email, role };
+}
+export async function setMemberRole(tripId, memberId, role) {
+  if (!["editor", "viewer"].includes(role)) throw new Error("Geçersiz rol");
+  await pool.query(`UPDATE trip_members SET role = $1 WHERE id = $2 AND trip_id = $3`, [role, memberId, tripId]);
+}
+export async function getMemberRole(tripId, userId) {
+  const { rows } = await pool.query(`SELECT role FROM trip_members WHERE trip_id = $1 AND user_id = $2`, [tripId, userId]);
+  return rows[0]?.role || null;
 }
 
 export async function removeMember(tripId, memberId) {
@@ -296,20 +373,44 @@ export async function deleteTripPhoto(tripId, photoId) {
 export async function getMessages(tripId, limit = 100) {
   const { rows } = await pool.query(
     `SELECT id, sender_member_id as "senderMemberId", sender_name as "senderName",
-            kind, text, lat, lon, created_at as "createdAt"
+            kind, text, lat, lon, live, photo, created_at as "createdAt"
      FROM trip_messages WHERE trip_id = $1 ORDER BY created_at ASC LIMIT $2`,
     [tripId, limit]
   );
   return rows;
 }
-export async function addMessage(tripId, { senderMemberId, senderName, kind, text, lat, lon }) {
+export async function addMessage(tripId, { senderMemberId, senderName, kind, text, lat, lon, live, photo }) {
   const id = randomUUID();
   await pool.query(
-    `INSERT INTO trip_messages (id, trip_id, sender_member_id, sender_name, kind, text, lat, lon, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-    [id, tripId, senderMemberId, senderName, kind, text || null, lat ?? null, lon ?? null, now()]
+    `INSERT INTO trip_messages (id, trip_id, sender_member_id, sender_name, kind, text, lat, lon, live, photo, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+    [id, tripId, senderMemberId, senderName, kind, text || null, lat ?? null, lon ?? null, !!live, photo || null, now()]
   );
-  return { id, tripId, senderMemberId, senderName, kind, text: text || null, lat: lat ?? null, lon: lon ?? null, createdAt: now() };
+  return { id, tripId, senderMemberId, senderName, kind, text: text || null, lat: lat ?? null, lon: lon ?? null, live: !!live, photo: photo || null, createdAt: now() };
+}
+
+/* --------------------------- push subscriptions ---------------------------- */
+export async function upsertPushSubscription(userId, { endpoint, p256dh, auth, prefs }) {
+  await pool.query(
+    `INSERT INTO push_subscriptions (id, user_id, endpoint, p256dh, auth, prefs, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (endpoint) DO UPDATE SET user_id = $2, p256dh = $4, auth = $5, prefs = $6`,
+    [randomUUID(), userId, endpoint, p256dh, auth, JSON.stringify(prefs || {}), now()]
+  );
+}
+export async function removePushSubscription(endpoint) {
+  await pool.query(`DELETE FROM push_subscriptions WHERE endpoint = $1`, [endpoint]);
+}
+export async function updatePushPrefs(endpoint, prefs) {
+  await pool.query(`UPDATE push_subscriptions SET prefs = $1 WHERE endpoint = $2`, [JSON.stringify(prefs || {}), endpoint]);
+}
+export async function getPushSubscriptionsForUsers(userIds) {
+  if (!userIds.length) return [];
+  const { rows } = await pool.query(
+    `SELECT id, user_id as "userId", endpoint, p256dh, auth, prefs FROM push_subscriptions WHERE user_id = ANY($1)`,
+    [userIds]
+  );
+  return rows.map(r => ({ ...r, prefs: JSON.parse(r.prefs || "{}") }));
 }
 
 /* --------------------------- hazards ---------------------------- */

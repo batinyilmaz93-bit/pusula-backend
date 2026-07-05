@@ -2,6 +2,7 @@ import { Router } from "express";
 import * as db from "../db.js";
 import { requireAuth } from "../auth.js";
 import { sendEmail } from "../email.js";
+import { sendPushToUsers } from "../push.js";
 
 export default function tripsRouter(io) {
   const router = Router();
@@ -24,6 +25,18 @@ export default function tripsRouter(io) {
   const assertMember = async (req, res) => {
     if (!(await db.isTripMember(req.params.id, req.userId))) {
       res.status(403).json({ error: "Bu seyahatin üyesi değilsin" });
+      return false;
+    }
+    return true;
+  };
+
+  // "viewer" role members can see everything but can't add/edit content —
+  // used to gate expense/hazard/photo/chat mutations, not read routes.
+  const assertCanEdit = async (req, res) => {
+    if (!(await assertMember(req, res))) return false;
+    const role = await db.getMemberRole(req.params.id, req.userId);
+    if (role === "viewer") {
+      res.status(403).json({ error: "Sadece görüntüleme yetkin var, değişiklik yapamazsın" });
       return false;
     }
     return true;
@@ -65,6 +78,8 @@ export default function tripsRouter(io) {
     const fresh = await broadcast(trip.id);
     if (!alreadyMember) {
       notify(trip.id, { type: "member_joined", title: "Yeni üye katıldı", body: `${req.userName} seyahate katıldı`, actorUserId: req.userId });
+      const userIds = fresh.members.map(m => m.userId).filter(Boolean);
+      sendPushToUsers(userIds, { type: "member_joined", title: "Yeni üye katıldı", body: `${req.userName}, "${fresh.name}" seyahatine katıldı`, excludeUserId: req.userId }).catch(() => {});
     }
     res.json(fresh);
   }));
@@ -129,9 +144,24 @@ export default function tripsRouter(io) {
     res.json(await broadcast(req.params.id));
   }));
 
+  router.patch("/:id/members/:memberId/role", h(async (req, res) => {
+    if (!(await assertMember(req, res))) return;
+    const trip = await db.getTripFull(req.params.id);
+    const isAdmin = trip.members.find(m => m.id === trip.admin)?.userId === req.userId;
+    if (!isAdmin) return res.status(403).json({ error: "Sadece admin rol değiştirebilir" });
+    if (req.params.memberId === trip.admin) return res.status(400).json({ error: "Admin'in rolü değiştirilemez" });
+    const { role } = req.body || {};
+    try {
+      await db.setMemberRole(req.params.id, req.params.memberId, role);
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
+    res.json(await broadcast(req.params.id));
+  }));
+
   // ---- expenses ----
   router.post("/:id/expenses", h(async (req, res) => {
-    if (!(await assertMember(req, res))) return;
+    if (!(await assertCanEdit(req, res))) return;
     const { desc, amount, category, paidBy, splitAmong, receiptPhoto } = req.body || {};
     if (!desc?.trim() || !amount || amount <= 0 || !paidBy || !splitAmong?.length) {
       return res.status(400).json({ error: "Eksik veya geçersiz harcama verisi" });
@@ -142,11 +172,14 @@ export default function tripsRouter(io) {
     await db.addExpense(req.params.id, { desc: desc.trim(), amount, category, paidBy, splitAmong, receiptPhoto: receiptPhoto || null });
     const fresh = await broadcast(req.params.id);
     notify(req.params.id, { type: "expense_added", title: "Yeni harcama", body: `${req.userName}: "${desc.trim()}" — ${amount} eklendi`, actorUserId: req.userId });
+    sendPushToUsers(fresh.members.map(m => m.userId).filter(Boolean), {
+      type: "expense_added", title: "Yeni harcama", body: `${req.userName}: "${desc.trim()}" — ${amount} eklendi`, excludeUserId: req.userId,
+    }).catch(() => {});
     res.status(201).json(fresh);
   }));
 
   router.post("/:id/settle", h(async (req, res) => {
-    if (!(await assertMember(req, res))) return;
+    if (!(await assertCanEdit(req, res))) return;
     const { from, to, amount } = req.body || {};
     if (!from || !to || !amount || amount <= 0) return res.status(400).json({ error: "Eksik ödeme verisi" });
     const trip = await db.getTripFull(req.params.id);
@@ -157,17 +190,20 @@ export default function tripsRouter(io) {
     });
     const fresh = await broadcast(req.params.id);
     notify(req.params.id, { type: "payment_made", title: "Ödeme yapıldı", body: `${nameOf(from)}, ${nameOf(to)}'ya ${amount} ödedi`, actorUserId: req.userId });
+    sendPushToUsers(fresh.members.map(m => m.userId).filter(Boolean), {
+      type: "payment_made", title: "Ödeme yapıldı", body: `${nameOf(from)}, ${nameOf(to)}'ya ${amount} ödedi`, excludeUserId: req.userId,
+    }).catch(() => {});
     res.status(201).json(fresh);
   }));
 
   router.delete("/:id/expenses/:expenseId", h(async (req, res) => {
-    if (!(await assertMember(req, res))) return;
+    if (!(await assertCanEdit(req, res))) return;
     await db.deleteExpense(req.params.id, req.params.expenseId);
     res.json(await broadcast(req.params.id));
   }));
 
   router.post("/:id/photos", h(async (req, res) => {
-    if (!(await assertMember(req, res))) return;
+    if (!(await assertCanEdit(req, res))) return;
     const { photo } = req.body || {};
     if (!photo) return res.status(400).json({ error: "Fotoğraf gerekli" });
     if (photo.length > 3_000_000) return res.status(400).json({ error: "Fotoğraf çok büyük" });
@@ -178,7 +214,7 @@ export default function tripsRouter(io) {
   }));
 
   router.delete("/:id/photos/:photoId", h(async (req, res) => {
-    if (!(await assertMember(req, res))) return;
+    if (!(await assertCanEdit(req, res))) return;
     await db.deleteTripPhoto(req.params.id, req.params.photoId);
     res.json(await broadcast(req.params.id));
   }));
@@ -195,29 +231,48 @@ export default function tripsRouter(io) {
     const me = trip.members.find(m => m.userId === req.userId);
     if (!me) return res.status(403).json({ error: "Bu seyahatin üyesi değilsin" });
 
-    const { kind, text, lat, lon } = req.body || {};
+    const { kind, text, lat, lon, photo, live } = req.body || {};
     if (kind === "location") {
       if (typeof lat !== "number" || typeof lon !== "number") {
         return res.status(400).json({ error: "Konum bilgisi geçersiz" });
       }
+    } else if (kind === "photo") {
+      if (!photo) return res.status(400).json({ error: "Fotoğraf gerekli" });
+      if (photo.length > 3_000_000) return res.status(400).json({ error: "Fotoğraf çok büyük" });
     } else if (!text?.trim()) {
       return res.status(400).json({ error: "Mesaj boş olamaz" });
     }
+    const validKind = ["location", "photo"].includes(kind) ? kind : "text";
     const message = await db.addMessage(req.params.id, {
       senderMemberId: me.id, senderName: me.name,
-      kind: kind === "location" ? "location" : "text",
-      text: text?.trim(), lat, lon,
+      kind: validKind,
+      text: text?.trim(), lat, lon, live: validKind === "location" ? !!live : false, photo: validKind === "photo" ? photo : null,
     });
     // Chat is high-frequency — push just the new message over the socket
     // instead of re-broadcasting (and every client re-fetching) the whole
     // trip object the way other mutations do.
     io.to(`trip:${req.params.id}`).emit("trip:message", message);
+    const isLocation = message.kind === "location";
+    const isPhoto = message.kind === "photo";
+    // Live-tracking sends a new location every ~45s — only the first one
+    // (frontend passes live:false for that one, true for the periodic
+    // follow-ups) should actually ping people; otherwise every walk down
+    // the street would spam everyone's phone with notifications.
+    const shouldNotify = !isLocation || !live;
+    if (shouldNotify) {
+      sendPushToUsers(trip.members.map(m => m.userId).filter(Boolean), {
+        type: isLocation ? "location_shared" : "chat_message",
+        title: isLocation ? "Konum paylaşıldı" : me.name,
+        body: isLocation ? `${me.name} konumunu paylaşıyor` : isPhoto ? `${me.name} bir fotoğraf gönderdi` : message.text,
+        excludeUserId: req.userId,
+      }).catch(() => {});
+    }
     res.status(201).json(message);
   }));
 
   // ---- hazards (community safety notes) ----
   router.post("/:id/hazards", h(async (req, res) => {
-    if (!(await assertMember(req, res))) return;
+    if (!(await assertCanEdit(req, res))) return;
     const text = (req.body?.text || "").trim();
     if (!text) return res.status(400).json({ error: "Metin gerekli" });
     await db.addHazard(req.params.id, text, req.userId);
@@ -225,7 +280,7 @@ export default function tripsRouter(io) {
   }));
 
   router.delete("/:id/hazards/:hazardId", h(async (req, res) => {
-    if (!(await assertMember(req, res))) return;
+    if (!(await assertCanEdit(req, res))) return;
     await db.deleteHazard(req.params.id, req.params.hazardId);
     res.json(await broadcast(req.params.id));
   }));

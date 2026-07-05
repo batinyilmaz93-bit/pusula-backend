@@ -3,6 +3,7 @@ import {
   issueDeviceToken, registerWithPassword, loginWithPassword,
   requestPasswordReset, confirmPasswordReset, updateProfile, requireAuth,
 } from "../auth.js";
+import { exportUserData, deleteUserAccount } from "../db.js";
 
 const router = Router();
 
@@ -67,6 +68,24 @@ router.patch("/profile", requireAuth, async (req, res) => {
     res.json({ user: { id: user.id, name: user.name, email: user.email, phone: user.phone, avatarPhoto: user.avatar_photo } });
   } catch (e) {
     res.status(400).json({ error: e.message });
+  }
+});
+
+router.get("/export", requireAuth, async (req, res) => {
+  try {
+    const data = await exportUserData(req.userId);
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.delete("/account", requireAuth, async (req, res) => {
+  try {
+    await deleteUserAccount(req.userId);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
