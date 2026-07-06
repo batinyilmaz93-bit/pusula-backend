@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { randomInt } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import * as db from "../db.js";
 import { requireAuth } from "../auth.js";
 import { sendEmail } from "../email.js";
@@ -416,10 +416,6 @@ export default function tripsRouter(io) {
   }));
 
   // ---- payment game (randomly decide who pays) ----
-  router.get("/:id/game/history", h(async (req, res) => {
-    if (!(await assertMember(req, res))) return;
-    res.json({ results: await db.getGameResults(req.params.id) });
-  }));
   router.post("/:id/game/spin", h(async (req, res) => {
     if (!(await assertMember(req, res))) return;
     const trip = await db.getTripFull(req.params.id);
@@ -430,7 +426,8 @@ export default function tripsRouter(io) {
     // Cryptographically secure randomness — this picks who pays, so it needs
     // to actually be fair and unpredictable, not Math.random().
     const winnerId = validIds[randomInt(0, validIds.length)];
-    const result = await db.addGameResult(req.params.id, { participantIds: validIds, winnerId, playedBy: req.userId });
+    // Not persisted anywhere — this is a live, in-the-moment result only.
+    const result = { id: randomUUID(), tripId: req.params.id, participantIds: validIds, winnerId, createdAt: new Date().toISOString() };
     io.to(`trip:${req.params.id}`).emit("trip:game", result); // everyone watching sees the same spin land on the same result
     const winnerName = trip.members.find(m => m.id === winnerId)?.name || "Birisi";
     notify(req.params.id, { type: "expense_added", title: "Ödeme Oyunu 🎲", body: `${winnerName} bu sefer ısmarlıyor!`, actorUserId: req.userId });
