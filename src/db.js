@@ -140,6 +140,15 @@ export async function initSchema() {
       created_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS trip_game_results (
+      id TEXT PRIMARY KEY,
+      trip_id TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+      participant_ids TEXT NOT NULL,
+      winner_id TEXT NOT NULL,
+      played_by TEXT,
+      created_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS trip_messages (
       id TEXT PRIMARY KEY,
       trip_id TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
@@ -508,6 +517,24 @@ export async function addItineraryItem(tripId, { dayNumber, time, title, notes, 
 }
 export async function deleteItineraryItem(tripId, itemId) {
   await pool.query(`DELETE FROM trip_itinerary_items WHERE id = $1 AND trip_id = $2`, [itemId, tripId]);
+}
+
+/* --------------------------- payment game ---------------------------- */
+export async function addGameResult(tripId, { participantIds, winnerId, playedBy }) {
+  const id = randomUUID();
+  await pool.query(
+    `INSERT INTO trip_game_results (id, trip_id, participant_ids, winner_id, played_by, created_at) VALUES ($1, $2, $3, $4, $5, $6)`,
+    [id, tripId, JSON.stringify(participantIds), winnerId, playedBy || null, now()]
+  );
+  return { id, tripId, participantIds, winnerId, playedBy: playedBy || null, createdAt: now() };
+}
+export async function getGameResults(tripId, limit = 20) {
+  const { rows } = await pool.query(
+    `SELECT id, participant_ids as "participantIds", winner_id as "winnerId", played_by as "playedBy", created_at as "createdAt"
+     FROM trip_game_results WHERE trip_id = $1 ORDER BY created_at DESC LIMIT $2`,
+    [tripId, limit]
+  );
+  return rows.map(r => ({ ...r, participantIds: JSON.parse(r.participantIds) }));
 }
 
 /* --------------------------- chat messages ---------------------------- */

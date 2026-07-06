@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { randomInt } from "node:crypto";
 import * as db from "../db.js";
 import { requireAuth } from "../auth.js";
 import { sendEmail } from "../email.js";
@@ -79,7 +80,7 @@ export default function tripsRouter(io) {
     if (!alreadyMember) {
       notify(trip.id, { type: "member_joined", title: "Yeni üye katıldı", body: `${req.userName} seyahate katıldı`, actorUserId: req.userId });
       const userIds = fresh.members.map(m => m.userId).filter(Boolean);
-      sendPushToUsers(userIds, { type: "member_joined", title: "Yeni üye katıldı", body: `${req.userName}, "${fresh.name}" seyahatine katıldı`, excludeUserId: req.userId, url: `${process.env.APP_URL || "http://localhost:5173"}/?tripId=${trip.id}&view=home` }).catch(() => {});
+      sendPushToUsers(userIds, { type: "member_joined", title: "Yeni üye katıldı", body: `${req.userName}, "${fresh.name}" seyahatine katıldı`, excludeUserId: req.userId, url: `/?tripId=${trip.id}&view=home` }).catch(() => {});
     }
     res.json(fresh);
   }));
@@ -182,7 +183,7 @@ export default function tripsRouter(io) {
     notify(req.params.id, { type: "expense_added", title: "Yeni harcama", body: `${req.userName}: "${desc.trim()}" — ${amount} eklendi`, actorUserId: req.userId });
     sendPushToUsers(fresh.members.map(m => m.userId).filter(Boolean), {
       type: "expense_added", title: "Yeni harcama", body: `${req.userName}: "${desc.trim()}" — ${amount} eklendi`, excludeUserId: req.userId,
-      url: `${process.env.APP_URL || "http://localhost:5173"}/?tripId=${req.params.id}&view=budget`,
+      url: `/?tripId=${req.params.id}&view=budget`,
     }).catch(() => {});
     res.status(201).json(fresh);
   }));
@@ -201,7 +202,7 @@ export default function tripsRouter(io) {
     notify(req.params.id, { type: "payment_made", title: "Ödeme yapıldı", body: `${nameOf(from)}, ${nameOf(to)}'ya ${amount} ödedi`, actorUserId: req.userId });
     sendPushToUsers(fresh.members.map(m => m.userId).filter(Boolean), {
       type: "payment_made", title: "Ödeme yapıldı", body: `${nameOf(from)}, ${nameOf(to)}'ya ${amount} ödedi`, excludeUserId: req.userId,
-      url: `${process.env.APP_URL || "http://localhost:5173"}/?tripId=${req.params.id}&view=budget`,
+      url: `/?tripId=${req.params.id}&view=budget`,
     }).catch(() => {});
     res.status(201).json(fresh);
   }));
@@ -275,7 +276,7 @@ export default function tripsRouter(io) {
         title: isLocation ? "Konum paylaşıldı" : me.name,
         body: isLocation ? `${me.name} konumunu paylaşıyor` : isPhoto ? `${me.name} bir fotoğraf gönderdi` : message.text,
         excludeUserId: req.userId,
-        url: `${process.env.APP_URL || "http://localhost:5173"}/?tripId=${req.params.id}&view=chat`,
+        url: `/?tripId=${req.params.id}&view=chat`,
       }).catch(() => {});
     }
     res.status(201).json(message);
@@ -306,7 +307,7 @@ export default function tripsRouter(io) {
     notify(req.params.id, { type: "payment_made", title: "Ödeme hatırlatması", body: `${fromName} sana ${amount ? amount + " tutarında " : ""}ödeme hatırlatması gönderdi`, actorUserId: req.userId });
     sendPushToUsers([target.userId], {
       type: "payment_made", title: "Ödeme hatırlatması", body: `${fromName} sana ${amount ? amount + " tutarında " : ""}ödeme hatırlatması gönderdi`, excludeUserId: req.userId,
-      url: `${process.env.APP_URL || "http://localhost:5173"}/?tripId=${req.params.id}&view=budget`,
+      url: `/?tripId=${req.params.id}&view=budget`,
     }).catch(() => {});
     res.json({ ok: true });
   }));
@@ -412,6 +413,32 @@ export default function tripsRouter(io) {
     const items = await db.getItinerary(req.params.id);
     io.to(`trip:${req.params.id}`).emit("trip:itinerary", { tripId: req.params.id, items });
     res.json({ items });
+  }));
+
+  // ---- payment game (randomly decide who pays) ----
+  router.get("/:id/game/history", h(async (req, res) => {
+    if (!(await assertMember(req, res))) return;
+    res.json({ results: await db.getGameResults(req.params.id) });
+  }));
+  router.post("/:id/game/spin", h(async (req, res) => {
+    if (!(await assertMember(req, res))) return;
+    const trip = await db.getTripFull(req.params.id);
+    const { participantIds } = req.body || {};
+    const validIds = (Array.isArray(participantIds) ? participantIds : [])
+      .filter(id => trip.members.some(m => m.id === id));
+    if (validIds.length < 2) return res.status(400).json({ error: "En az 2 kişi seçilmeli" });
+    // Cryptographically secure randomness — this picks who pays, so it needs
+    // to actually be fair and unpredictable, not Math.random().
+    const winnerId = validIds[randomInt(0, validIds.length)];
+    const result = await db.addGameResult(req.params.id, { participantIds: validIds, winnerId, playedBy: req.userId });
+    io.to(`trip:${req.params.id}`).emit("trip:game", result); // everyone watching sees the same spin land on the same result
+    const winnerName = trip.members.find(m => m.id === winnerId)?.name || "Birisi";
+    notify(req.params.id, { type: "expense_added", title: "Ödeme Oyunu 🎲", body: `${winnerName} bu sefer ısmarlıyor!`, actorUserId: req.userId });
+    sendPushToUsers(trip.members.map(m => m.userId).filter(Boolean), {
+      type: "expense_added", title: "Ödeme Oyunu 🎲", body: `${winnerName} bu sefer ısmarlıyor!`, excludeUserId: req.userId,
+      url: `/?tripId=${req.params.id}&view=game`,
+    }).catch(() => {});
+    res.status(201).json(result);
   }));
 
   return router;

@@ -19,7 +19,7 @@ const httpServer = createServer(app);
 const io = new Server(httpServer, { cors: { origin: "*" } });
 attachSocketHandlers(io);
 
-const BUILD_VERSION = "2026-07-06T13:05Z";
+const BUILD_VERSION = "2026-07-06T22:07Z";
 
 app.get("/api/health", (req, res) => res.json({ ok: true, version: BUILD_VERSION, time: new Date().toISOString() }));
 app.use("/api/auth", authRouter);
