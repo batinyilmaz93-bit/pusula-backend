@@ -79,7 +79,7 @@ export default function tripsRouter(io) {
     if (!alreadyMember) {
       notify(trip.id, { type: "member_joined", title: "Yeni üye katıldı", body: `${req.userName} seyahate katıldı`, actorUserId: req.userId });
       const userIds = fresh.members.map(m => m.userId).filter(Boolean);
-      sendPushToUsers(userIds, { type: "member_joined", title: "Yeni üye katıldı", body: `${req.userName}, "${fresh.name}" seyahatine katıldı`, excludeUserId: req.userId }).catch(() => {});
+      sendPushToUsers(userIds, { type: "member_joined", title: "Yeni üye katıldı", body: `${req.userName}, "${fresh.name}" seyahatine katıldı`, excludeUserId: req.userId, url: `${process.env.APP_URL || "http://localhost:5173"}/?tripId=${trip.id}&view=home` }).catch(() => {});
     }
     res.json(fresh);
   }));
@@ -162,18 +162,27 @@ export default function tripsRouter(io) {
   // ---- expenses ----
   router.post("/:id/expenses", h(async (req, res) => {
     if (!(await assertCanEdit(req, res))) return;
-    const { desc, amount, category, paidBy, splitAmong, receiptPhoto } = req.body || {};
+    const { desc, amount, category, paidBy, splitAmong, receiptPhoto, splitAmounts } = req.body || {};
     if (!desc?.trim() || !amount || amount <= 0 || !paidBy || !splitAmong?.length) {
       return res.status(400).json({ error: "Eksik veya geçersiz harcama verisi" });
     }
     if (receiptPhoto && receiptPhoto.length > 4_000_000) {
       return res.status(400).json({ error: "Fotoğraf çok büyük, daha küçük bir tane dene" });
     }
-    await db.addExpense(req.params.id, { desc: desc.trim(), amount, category, paidBy, splitAmong, receiptPhoto: receiptPhoto || null });
+    let validatedSplitAmounts = null;
+    if (splitAmounts && typeof splitAmounts === "object") {
+      const sum = Object.values(splitAmounts).reduce((a, b) => a + Number(b || 0), 0);
+      if (Math.abs(sum - amount) > 0.05) {
+        return res.status(400).json({ error: `Kişi başı tutarların toplamı (${sum.toFixed(2)}) harcama tutarına (${amount}) eşit değil` });
+      }
+      validatedSplitAmounts = splitAmounts;
+    }
+    await db.addExpense(req.params.id, { desc: desc.trim(), amount, category, paidBy, splitAmong, receiptPhoto: receiptPhoto || null, splitAmounts: validatedSplitAmounts });
     const fresh = await broadcast(req.params.id);
     notify(req.params.id, { type: "expense_added", title: "Yeni harcama", body: `${req.userName}: "${desc.trim()}" — ${amount} eklendi`, actorUserId: req.userId });
     sendPushToUsers(fresh.members.map(m => m.userId).filter(Boolean), {
       type: "expense_added", title: "Yeni harcama", body: `${req.userName}: "${desc.trim()}" — ${amount} eklendi`, excludeUserId: req.userId,
+      url: `${process.env.APP_URL || "http://localhost:5173"}/?tripId=${req.params.id}&view=budget`,
     }).catch(() => {});
     res.status(201).json(fresh);
   }));
@@ -192,6 +201,7 @@ export default function tripsRouter(io) {
     notify(req.params.id, { type: "payment_made", title: "Ödeme yapıldı", body: `${nameOf(from)}, ${nameOf(to)}'ya ${amount} ödedi`, actorUserId: req.userId });
     sendPushToUsers(fresh.members.map(m => m.userId).filter(Boolean), {
       type: "payment_made", title: "Ödeme yapıldı", body: `${nameOf(from)}, ${nameOf(to)}'ya ${amount} ödedi`, excludeUserId: req.userId,
+      url: `${process.env.APP_URL || "http://localhost:5173"}/?tripId=${req.params.id}&view=budget`,
     }).catch(() => {});
     res.status(201).json(fresh);
   }));
@@ -265,6 +275,7 @@ export default function tripsRouter(io) {
         title: isLocation ? "Konum paylaşıldı" : me.name,
         body: isLocation ? `${me.name} konumunu paylaşıyor` : isPhoto ? `${me.name} bir fotoğraf gönderdi` : message.text,
         excludeUserId: req.userId,
+        url: `${process.env.APP_URL || "http://localhost:5173"}/?tripId=${req.params.id}&view=chat`,
       }).catch(() => {});
     }
     res.status(201).json(message);
@@ -283,6 +294,124 @@ export default function tripsRouter(io) {
     if (!(await assertCanEdit(req, res))) return;
     await db.deleteHazard(req.params.id, req.params.hazardId);
     res.json(await broadcast(req.params.id));
+  }));
+
+  router.post("/:id/remind", h(async (req, res) => {
+    if (!(await assertMember(req, res))) return;
+    const trip = await db.getTripFull(req.params.id);
+    const { toMemberId, amount } = req.body || {};
+    const target = trip.members.find(m => m.id === toMemberId);
+    if (!target?.userId) return res.status(400).json({ error: "Bu kişiye hatırlatma gönderilemiyor (hesabı yok)" });
+    const fromName = req.userName;
+    notify(req.params.id, { type: "payment_made", title: "Ödeme hatırlatması", body: `${fromName} sana ${amount ? amount + " tutarında " : ""}ödeme hatırlatması gönderdi`, actorUserId: req.userId });
+    sendPushToUsers([target.userId], {
+      type: "payment_made", title: "Ödeme hatırlatması", body: `${fromName} sana ${amount ? amount + " tutarında " : ""}ödeme hatırlatması gönderdi`, excludeUserId: req.userId,
+      url: `${process.env.APP_URL || "http://localhost:5173"}/?tripId=${req.params.id}&view=budget`,
+    }).catch(() => {});
+    res.json({ ok: true });
+  }));
+
+  // ---- polls (group decisions: dates, destinations, activities) ----
+  router.get("/:id/polls", h(async (req, res) => {
+    if (!(await assertMember(req, res))) return;
+    res.json({ polls: await db.getPolls(req.params.id) });
+  }));
+  router.post("/:id/polls", h(async (req, res) => {
+    if (!(await assertCanEdit(req, res))) return;
+    const { question, options } = req.body || {};
+    if (!question?.trim() || !Array.isArray(options) || options.length < 2) {
+      return res.status(400).json({ error: "Soru ve en az 2 seçenek gerekli" });
+    }
+    await db.addPoll(req.params.id, { question: question.trim(), options: options.map(o => String(o).trim()).filter(Boolean), createdBy: req.userId });
+    io.to(`trip:${req.params.id}`).emit("trip:polls", { tripId: req.params.id });
+    res.status(201).json({ polls: await db.getPolls(req.params.id) });
+  }));
+  router.post("/:id/polls/:pollId/vote", h(async (req, res) => {
+    if (!(await assertMember(req, res))) return;
+    const trip = await db.getTripFull(req.params.id);
+    const me = trip.members.find(m => m.userId === req.userId);
+    if (!me) return res.status(403).json({ error: "Bu seyahatin üyesi değilsin" });
+    const { optionIndex } = req.body || {};
+    if (typeof optionIndex !== "number") return res.status(400).json({ error: "Geçersiz seçenek" });
+    await db.voteOnPoll(req.params.pollId, me.id, optionIndex);
+    io.to(`trip:${req.params.id}`).emit("trip:polls", { tripId: req.params.id });
+    res.json({ polls: await db.getPolls(req.params.id) });
+  }));
+  router.delete("/:id/polls/:pollId", h(async (req, res) => {
+    if (!(await assertCanEdit(req, res))) return;
+    await db.deletePoll(req.params.id, req.params.pollId);
+    io.to(`trip:${req.params.id}`).emit("trip:polls", { tripId: req.params.id });
+    res.json({ polls: await db.getPolls(req.params.id) });
+  }));
+
+  // ---- packing list ----
+  router.get("/:id/packing", h(async (req, res) => {
+    if (!(await assertMember(req, res))) return;
+    res.json({ items: await db.getPackingItems(req.params.id) });
+  }));
+  router.post("/:id/packing", h(async (req, res) => {
+    if (!(await assertCanEdit(req, res))) return;
+    const { text, assignedTo } = req.body || {};
+    if (!text?.trim()) return res.status(400).json({ error: "Madde metni gerekli" });
+    await db.addPackingItem(req.params.id, { text: text.trim(), assignedTo });
+    const items = await db.getPackingItems(req.params.id);
+    io.to(`trip:${req.params.id}`).emit("trip:packing", { tripId: req.params.id, items });
+    res.status(201).json({ items });
+  }));
+  router.patch("/:id/packing/:itemId", h(async (req, res) => {
+    if (!(await assertCanEdit(req, res))) return;
+    await db.togglePackingItem(req.params.id, req.params.itemId, !!req.body?.done);
+    const items = await db.getPackingItems(req.params.id);
+    io.to(`trip:${req.params.id}`).emit("trip:packing", { tripId: req.params.id, items });
+    res.json({ items });
+  }));
+  router.delete("/:id/packing/:itemId", h(async (req, res) => {
+    if (!(await assertCanEdit(req, res))) return;
+    await db.deletePackingItem(req.params.id, req.params.itemId);
+    const items = await db.getPackingItems(req.params.id);
+    io.to(`trip:${req.params.id}`).emit("trip:packing", { tripId: req.params.id, items });
+    res.json({ items });
+  }));
+
+  // ---- documents (passports, booking confirmations, insurance) ----
+  router.get("/:id/documents", h(async (req, res) => {
+    if (!(await assertMember(req, res))) return;
+    res.json({ documents: await db.getDocuments(req.params.id) });
+  }));
+  router.post("/:id/documents", h(async (req, res) => {
+    if (!(await assertCanEdit(req, res))) return;
+    const { name, file } = req.body || {};
+    if (!name?.trim() || !file) return res.status(400).json({ error: "Belge adı ve dosyası gerekli" });
+    if (file.length > 6_000_000) return res.status(400).json({ error: "Dosya çok büyük" });
+    await db.addDocument(req.params.id, { name: name.trim(), file, uploadedBy: req.userId });
+    res.status(201).json({ documents: await db.getDocuments(req.params.id) });
+  }));
+  router.delete("/:id/documents/:docId", h(async (req, res) => {
+    if (!(await assertCanEdit(req, res))) return;
+    await db.deleteDocument(req.params.id, req.params.docId);
+    res.json({ documents: await db.getDocuments(req.params.id) });
+  }));
+
+  // ---- day-by-day itinerary ----
+  router.get("/:id/itinerary", h(async (req, res) => {
+    if (!(await assertMember(req, res))) return;
+    res.json({ items: await db.getItinerary(req.params.id) });
+  }));
+  router.post("/:id/itinerary", h(async (req, res) => {
+    if (!(await assertCanEdit(req, res))) return;
+    const { dayNumber, time, title, notes } = req.body || {};
+    if (!title?.trim()) return res.status(400).json({ error: "Başlık gerekli" });
+    await db.addItineraryItem(req.params.id, { dayNumber, time, title: title.trim(), notes, createdBy: req.userId });
+    const items = await db.getItinerary(req.params.id);
+    io.to(`trip:${req.params.id}`).emit("trip:itinerary", { tripId: req.params.id, items });
+    res.status(201).json({ items });
+  }));
+  router.delete("/:id/itinerary/:itemId", h(async (req, res) => {
+    if (!(await assertCanEdit(req, res))) return;
+    await db.deleteItineraryItem(req.params.id, req.params.itemId);
+    const items = await db.getItinerary(req.params.id);
+    io.to(`trip:${req.params.id}`).emit("trip:itinerary", { tripId: req.params.id, items });
+    res.json({ items });
   }));
 
   return router;

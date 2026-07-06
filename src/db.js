@@ -71,6 +71,7 @@ export async function initSchema() {
       category TEXT NOT NULL DEFAULT 'diger',
       paid_by TEXT NOT NULL,
       split_among TEXT NOT NULL,
+      split_amounts TEXT,
       is_settlement INTEGER NOT NULL DEFAULT 0,
       receipt_photo TEXT,
       created_at TEXT NOT NULL
@@ -89,6 +90,53 @@ export async function initSchema() {
       trip_id TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
       photo TEXT NOT NULL,
       uploaded_by TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS trip_polls (
+      id TEXT PRIMARY KEY,
+      trip_id TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+      question TEXT NOT NULL,
+      options TEXT NOT NULL,
+      created_by TEXT,
+      closed BOOLEAN NOT NULL DEFAULT false,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS trip_poll_votes (
+      id TEXT PRIMARY KEY,
+      poll_id TEXT NOT NULL REFERENCES trip_polls(id) ON DELETE CASCADE,
+      member_id TEXT NOT NULL,
+      option_index INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(poll_id, member_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS trip_packing_items (
+      id TEXT PRIMARY KEY,
+      trip_id TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+      text TEXT NOT NULL,
+      assigned_to TEXT,
+      done BOOLEAN NOT NULL DEFAULT false,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS trip_documents (
+      id TEXT PRIMARY KEY,
+      trip_id TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      file TEXT NOT NULL,
+      uploaded_by TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS trip_itinerary_items (
+      id TEXT PRIMARY KEY,
+      trip_id TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+      day_number INTEGER NOT NULL DEFAULT 1,
+      time TEXT,
+      title TEXT NOT NULL,
+      notes TEXT,
+      created_by TEXT,
       created_at TEXT NOT NULL
     );
 
@@ -132,6 +180,7 @@ export async function initSchema() {
     ALTER TABLE trip_members ADD COLUMN IF NOT EXISTS email TEXT;
     ALTER TABLE trip_members ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'editor';
     ALTER TABLE expenses ADD COLUMN IF NOT EXISTS receipt_photo TEXT;
+    ALTER TABLE expenses ADD COLUMN IF NOT EXISTS split_amounts TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_photo TEXT;
     ALTER TABLE trip_messages ADD COLUMN IF NOT EXISTS photo TEXT;
@@ -218,6 +267,7 @@ export async function getTripFull(tripId) {
   const expenses = expensesRaw.map(e => ({
     id: e.id, desc: e.description, amount: e.amount, category: e.category,
     paidBy: e.paid_by, splitAmong: JSON.parse(e.split_among),
+    splitAmounts: e.split_amounts ? JSON.parse(e.split_amounts) : null,
     isSettlement: !!e.is_settlement, receiptPhoto: e.receipt_photo || null, date: e.created_at,
   }));
   const { rows: hazards } = await pool.query(
@@ -340,12 +390,12 @@ export async function removeMember(tripId, memberId) {
 }
 
 /* --------------------------- expenses ---------------------------- */
-export async function addExpense(tripId, { desc, amount, category, paidBy, splitAmong, isSettlement = false, receiptPhoto = null }) {
+export async function addExpense(tripId, { desc, amount, category, paidBy, splitAmong, isSettlement = false, receiptPhoto = null, splitAmounts = null }) {
   const id = randomUUID();
   await pool.query(`
-    INSERT INTO expenses (id, trip_id, description, amount, category, paid_by, split_among, is_settlement, receipt_photo, created_at)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-  `, [id, tripId, desc, amount, category || "diger", paidBy, JSON.stringify(splitAmong), isSettlement ? 1 : 0, receiptPhoto, now()]);
+    INSERT INTO expenses (id, trip_id, description, amount, category, paid_by, split_among, split_amounts, is_settlement, receipt_photo, created_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+  `, [id, tripId, desc, amount, category || "diger", paidBy, JSON.stringify(splitAmong), splitAmounts ? JSON.stringify(splitAmounts) : null, isSettlement ? 1 : 0, receiptPhoto, now()]);
   return id;
 }
 export async function deleteExpense(tripId, expenseId) {
@@ -367,6 +417,97 @@ export async function addTripPhoto(tripId, { photo, uploadedBy }) {
 }
 export async function deleteTripPhoto(tripId, photoId) {
   await pool.query(`DELETE FROM trip_photos WHERE id = $1 AND trip_id = $2`, [photoId, tripId]);
+}
+
+/* --------------------------- polls ---------------------------- */
+export async function getPolls(tripId) {
+  const { rows: polls } = await pool.query(
+    `SELECT id, question, options, created_by as "createdBy", closed, created_at as "createdAt"
+     FROM trip_polls WHERE trip_id = $1 ORDER BY created_at DESC`, [tripId]);
+  const { rows: votes } = await pool.query(
+    `SELECT pv.poll_id as "pollId", pv.member_id as "memberId", pv.option_index as "optionIndex"
+     FROM trip_poll_votes pv JOIN trip_polls p ON p.id = pv.poll_id WHERE p.trip_id = $1`, [tripId]);
+  return polls.map(p => ({
+    ...p, options: JSON.parse(p.options),
+    votes: votes.filter(v => v.pollId === p.id).map(v => ({ memberId: v.memberId, optionIndex: v.optionIndex })),
+  }));
+}
+export async function addPoll(tripId, { question, options, createdBy }) {
+  const id = randomUUID();
+  await pool.query(
+    `INSERT INTO trip_polls (id, trip_id, question, options, created_by, created_at) VALUES ($1, $2, $3, $4, $5, $6)`,
+    [id, tripId, question, JSON.stringify(options), createdBy, now()]);
+  return id;
+}
+export async function voteOnPoll(pollId, memberId, optionIndex) {
+  await pool.query(
+    `INSERT INTO trip_poll_votes (id, poll_id, member_id, option_index, created_at) VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (poll_id, member_id) DO UPDATE SET option_index = $4`,
+    [randomUUID(), pollId, memberId, optionIndex, now()]);
+}
+export async function closePoll(tripId, pollId) {
+  await pool.query(`UPDATE trip_polls SET closed = true WHERE id = $1 AND trip_id = $2`, [pollId, tripId]);
+}
+export async function deletePoll(tripId, pollId) {
+  await pool.query(`DELETE FROM trip_polls WHERE id = $1 AND trip_id = $2`, [pollId, tripId]);
+}
+
+/* --------------------------- packing list ---------------------------- */
+export async function getPackingItems(tripId) {
+  const { rows } = await pool.query(
+    `SELECT id, text, assigned_to as "assignedTo", done, created_at as "createdAt"
+     FROM trip_packing_items WHERE trip_id = $1 ORDER BY created_at ASC`, [tripId]);
+  return rows;
+}
+export async function addPackingItem(tripId, { text, assignedTo }) {
+  const id = randomUUID();
+  await pool.query(
+    `INSERT INTO trip_packing_items (id, trip_id, text, assigned_to, created_at) VALUES ($1, $2, $3, $4, $5)`,
+    [id, tripId, text, assignedTo || null, now()]);
+  return id;
+}
+export async function togglePackingItem(tripId, itemId, done) {
+  await pool.query(`UPDATE trip_packing_items SET done = $1 WHERE id = $2 AND trip_id = $3`, [done, itemId, tripId]);
+}
+export async function deletePackingItem(tripId, itemId) {
+  await pool.query(`DELETE FROM trip_packing_items WHERE id = $1 AND trip_id = $2`, [itemId, tripId]);
+}
+
+/* --------------------------- documents ---------------------------- */
+export async function getDocuments(tripId) {
+  const { rows } = await pool.query(
+    `SELECT id, name, file, uploaded_by as "uploadedBy", created_at as "createdAt"
+     FROM trip_documents WHERE trip_id = $1 ORDER BY created_at DESC`, [tripId]);
+  return rows;
+}
+export async function addDocument(tripId, { name, file, uploadedBy }) {
+  const id = randomUUID();
+  await pool.query(
+    `INSERT INTO trip_documents (id, trip_id, name, file, uploaded_by, created_at) VALUES ($1, $2, $3, $4, $5, $6)`,
+    [id, tripId, name, file, uploadedBy || null, now()]);
+  return id;
+}
+export async function deleteDocument(tripId, docId) {
+  await pool.query(`DELETE FROM trip_documents WHERE id = $1 AND trip_id = $2`, [docId, tripId]);
+}
+
+/* --------------------------- itinerary ---------------------------- */
+export async function getItinerary(tripId) {
+  const { rows } = await pool.query(
+    `SELECT id, day_number as "dayNumber", time, title, notes, created_by as "createdBy", created_at as "createdAt"
+     FROM trip_itinerary_items WHERE trip_id = $1 ORDER BY day_number ASC, time ASC NULLS LAST, created_at ASC`, [tripId]);
+  return rows;
+}
+export async function addItineraryItem(tripId, { dayNumber, time, title, notes, createdBy }) {
+  const id = randomUUID();
+  await pool.query(
+    `INSERT INTO trip_itinerary_items (id, trip_id, day_number, time, title, notes, created_by, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [id, tripId, dayNumber || 1, time || null, title, notes || null, createdBy || null, now()]);
+  return id;
+}
+export async function deleteItineraryItem(tripId, itemId) {
+  await pool.query(`DELETE FROM trip_itinerary_items WHERE id = $1 AND trip_id = $2`, [itemId, tripId]);
 }
 
 /* --------------------------- chat messages ---------------------------- */
